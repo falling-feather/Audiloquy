@@ -1,0 +1,29 @@
+# Downloaded benchmark material is kept locally for research and evaluation.
+/data/raw/
+/data/quarantine/
+/data/reference/*.pdf
+
+# Rendered pages, probes, and other disposable analysis output.
+/tmp/
+
+# Local build and IDE output (reserved for the implementation phase).
+/build/
+/build-*/
+/out/
+/dist/
+/prototype-output/
+/.private/
+**/.private/
+**/.cache/
+/ListeningStudioResults/
+/*_audio/
+deepseek.txt
+.env
+.env.*
+!.env.example
+*.lnk
+/.vs/
+/.vscode/
+*.user
+*.suo
+*.obj

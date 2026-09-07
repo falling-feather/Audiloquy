@@ -1,0 +1,17 @@
+English Listening Prototype - local development build
+
+This prototype uses Qt 6 libraries from the MSYS2 UCRT64 distribution.
+Qt is available under commercial and open-source licensing options. The local
+build currently uses the open-source distribution; see:
+https://doc.qt.io/qt-6/licensing.html
+
+The packaged directory also contains compiler/runtime dependencies copied from
+the MSYS2 UCRT64 toolchain. Their license texts and corresponding source package
+information are available from the MSYS2 package repository:
+https://packages.msys2.org/
+
+Windows Speech API and WinMM are operating-system components and are not
+redistributed by this project.
+
+This package is a local development prototype, not a public release. A formal
+SBOM and license audit remain release gates before external distribution.

@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "demo-campus-tour",
+  "title": "校园开放日听力示例",
+  "accent": "en-US",
+  "targetWpm": 118,
+  "segments": [
+    {
+      "id": "questions-1-2",
+      "questionStart": 1,
+      "questionEnd": 2,
+      "speaker": "Host",
+      "text": "Welcome to Greenfield High School. The library is on your left, next to the science building. It opens at eight thirty on weekdays.",
+      "pauseAfterSeconds": 4,
+      "repeatCount": 1
+    },
+    {
+      "id": "questions-3-4",
+      "questionStart": 3,
+      "questionEnd": 4,
+      "speaker": "Student",
+      "text": "Our English club meets every Wednesday after class. This week, we are preparing a short radio play about life in the future.",
+      "pauseAfterSeconds": 5,
+      "repeatCount": 2
+    },
+    {
+      "id": "question-5",
+      "questionStart": 5,
+      "questionEnd": 5,
+      "speaker": "Teacher",
+      "text": "Please remember to bring your notebook to Room 204 before the workshop begins at two fifteen.",
+      "pauseAfterSeconds": 5,
+      "repeatCount": 1
+    }
+  ]
+}

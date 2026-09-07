@@ -1,0 +1,317 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-31T00:00:00+08:00",
+  "project": "英语听力生成与播放工具（暂定）",
+  "purpose": "面向导入兼容性、听力节目结构、语速、停顿、响度和回放边界的本地研发基准语料。",
+  "terminology": {
+    "preferred": "公开基准语料",
+    "note": "这些材料不含个人数据，但“公开可访问”不等于“已获再分发许可”，因此不以“脱敏”替代版权判断。"
+  },
+  "distributionPolicy": {
+    "rawFiles": "internal-r-and-d-only-until-rights-review",
+    "trackedInGit": false,
+    "redistributionLicenseLocated": false,
+    "rule": "发布安装包、演示包或公开仓库时只携带清单与自制/已授权样例，不携带本目录原始试卷和音频。"
+  },
+  "measurementDefinitions": {
+    "speechWpm": "词数 / 有声语音时长；排除程序性停顿，用于衡量朗读本身。",
+    "passageWpm": "词数 / 单篇材料起止时长；保留自然句间停顿，用于衡量篇章听感。",
+    "programPacing": "整套节目时长及说明、读题、作答、重复等时间结构；不以单一 WPM 代替。",
+    "longSilence": "ffmpeg silencedetect，noise=-45dB，duration=1.0s。",
+    "loudness": "ffmpeg loudnorm/EBU R128 分析值；仅作基准比较，尚未确定产品导出目标。"
+  },
+  "corpora": [
+    {
+      "id": "gaokao-2024-new-i",
+      "label": "2024 年普通高等学校招生全国统一考试·新课标 I 卷",
+      "year": 2024,
+      "category": "national-paper",
+      "provenance": "third-party-public-mirror",
+      "sourcePages": [
+        "https://gaokaotiku.com/proxy-pdf.php?id=51448",
+        "https://www.jumenapp.online/GaoKao/english/lis.html",
+        "https://imgs.app.gaokaozhitongche.com/resource/pdf/paper/202406/20240610032717_qrsWFe.pdf"
+      ],
+      "rightsStatus": "publicly-accessible-no-explicit-redistribution-license-found",
+      "validation": {
+        "paperRendered": true,
+        "transcriptRendered": true,
+        "paperTranscriptSpotCheck": "pass",
+        "audioDecoded": true,
+        "notes": "下载链接以 .mp3 命名，但内容探测为 AAC/M4A；用于验证必须按内容而非扩展名导入。"
+      },
+      "files": [
+        {
+          "role": "paper-with-answer",
+          "path": "raw/gaokao/2024/new-gaokao-1/paper-with-answer.pdf",
+          "bytes": 581366,
+          "sha256": "e47a49eba5c2d75c2f6a52149dc3e1292c59045137382a4dcd11ed95f1e14ef2",
+          "pages": 22
+        },
+        {
+          "role": "transcript-and-answer",
+          "path": "raw/gaokao/2024/new-gaokao-1/transcript-and-answer.pdf",
+          "bytes": 1857145,
+          "sha256": "9411a51ec505651bf61276f96eef6631789c68dba082145bab70da9bd9654cd8",
+          "pages": 5
+        },
+        {
+          "role": "listening-audio",
+          "path": "raw/gaokao/2024/new-gaokao-1/listening.m4a",
+          "bytes": 8606630,
+          "sha256": "be08a4daed36927eab40301e7e48a9655d084ec86524265f17c43d54c09f8e29",
+          "audio": {
+            "container": "M4A",
+            "codec": "AAC",
+            "sampleRateHz": 44100,
+            "channels": 2,
+            "channelObservation": "effectively-dual-mono",
+            "bitrateKbpsApprox": 48,
+            "durationSeconds": 1411.84,
+            "integratedLufs": -25.0,
+            "loudnessRangeLu": 6.6,
+            "truePeakDbtp": -7.1,
+            "longSilenceSeconds": 465.781,
+            "longSilenceSegments": 87,
+            "longSilencePercent": 32.99
+          }
+        }
+      ]
+    },
+    {
+      "id": "gaokao-2024-new-ii",
+      "label": "2024 年普通高等学校招生全国统一考试·新课标 II 卷",
+      "year": 2024,
+      "category": "national-paper",
+      "provenance": "third-party-public-mirror",
+      "sourcePages": [
+        "https://gaokaotiku.com/proxy-pdf.php?id=51451",
+        "https://www.jumenapp.online/GaoKao/english/lis.html",
+        "https://kaosheng.com/down/202410/23/561.html"
+      ],
+      "rightsStatus": "publicly-accessible-no-explicit-redistribution-license-found",
+      "validation": {
+        "paperRendered": true,
+        "transcriptRendered": "html-source",
+        "paperTranscriptSpotCheck": "pass",
+        "audioDecoded": true,
+        "notes": "另一个标作新课标 II 的 PDF 实际含新课标 I 的 Kate/flight 开头，已隔离；音频链接扩展名与容器不一致。"
+      },
+      "files": [
+        {
+          "role": "paper-with-answer",
+          "path": "raw/gaokao/2024/new-gaokao-2/paper-with-answer.pdf",
+          "bytes": 365235,
+          "sha256": "e9d9f972a635e5f2903fb64a9f59c20b6a27267dcd5ef0a60e4032820e15196b",
+          "pages": 13
+        },
+        {
+          "role": "transcript-source",
+          "path": "raw/gaokao/2024/new-gaokao-2/transcript-source.html",
+          "bytes": 47251,
+          "sha256": "ecf1551065a021c56da3d9455c765b40e83c0a556169497d56b3a4789697d946"
+        },
+        {
+          "role": "listening-audio",
+          "path": "raw/gaokao/2024/new-gaokao-2/listening.m4a",
+          "bytes": 8602100,
+          "sha256": "9027a866e1fbd31b434106e1565cc28971e36b93e36e4c14f4a719f765271bc8",
+          "audio": {
+            "container": "M4A",
+            "codec": "AAC",
+            "sampleRateHz": 44100,
+            "channels": 2,
+            "channelObservation": "effectively-dual-mono",
+            "bitrateKbpsApprox": 48,
+            "durationSeconds": 1411.056,
+            "integratedLufs": -24.7,
+            "loudnessRangeLu": 6.4,
+            "truePeakDbtp": -6.6,
+            "longSilenceSeconds": 496.168,
+            "longSilenceSegments": 110,
+            "longSilencePercent": 35.16
+          }
+        }
+      ]
+    },
+    {
+      "id": "gaokao-2024-national-a",
+      "label": "2024 年普通高等学校招生全国统一考试·全国甲卷",
+      "year": 2024,
+      "category": "national-paper",
+      "provenance": "third-party-public-mirror",
+      "sourcePages": [
+        "https://gaokaotiku.com/proxy-pdf.php?id=51452",
+        "https://www.jumenapp.online/GaoKao/english/lis.html",
+        "https://www.sohu.com/a/786385908_121124030"
+      ],
+      "rightsStatus": "publicly-accessible-no-explicit-redistribution-license-found",
+      "validation": {
+        "paperRendered": true,
+        "transcriptRendered": "html-source",
+        "paperTranscriptSpotCheck": "pass",
+        "audioDecoded": true
+      },
+      "files": [
+        {
+          "role": "paper-with-answer",
+          "path": "raw/gaokao/2024/national-a/paper-with-answer.pdf",
+          "bytes": 361534,
+          "sha256": "4c2e415a0158e42def841fac2b27d546bd04fe512080504669175430a4540c17",
+          "pages": 10
+        },
+        {
+          "role": "transcript-source",
+          "path": "raw/gaokao/2024/national-a/transcript-source.html",
+          "bytes": 42161,
+          "sha256": "abaf150299074a2fe2cda2447c5d97430f839b2542e27b8d2fe3b687b2995011"
+        },
+        {
+          "role": "listening-audio",
+          "path": "raw/gaokao/2024/national-a/listening.mp3",
+          "bytes": 10914587,
+          "sha256": "1cd5ed1d5280a71bc7a1b4529467c4c79e22378a8432122a75a3b77030c970ea",
+          "audio": {
+            "container": "MP3",
+            "codec": "MP3",
+            "sampleRateHz": 44100,
+            "channels": 1,
+            "channelObservation": "mono",
+            "bitrateKbpsApprox": 64,
+            "durationSeconds": 1363.80075,
+            "integratedLufs": -28.1,
+            "loudnessRangeLu": 6.6,
+            "truePeakDbtp": -6.6,
+            "longSilenceSeconds": 474.515,
+            "longSilenceSegments": 98,
+            "longSilencePercent": 34.79
+          }
+        }
+      ]
+    },
+    {
+      "id": "gaokao-2024-zhejiang-january",
+      "label": "2024 年 1 月浙江省普通高校招生选考科目考试·英语",
+      "year": 2024,
+      "category": "provincial-paper",
+      "provenance": "third-party-public-mirror",
+      "sourcePages": [
+        "https://kaosj.com/papers/2024/06/2024-zhejiang-january-gaokao-english-paper/"
+      ],
+      "rightsStatus": "publicly-accessible-no-explicit-redistribution-license-found",
+      "validation": {
+        "paperOpened": true,
+        "audioDecoded": true,
+        "notes": "同时保留无答案和带答案 DOCX，用于测试办公文档导入。"
+      },
+      "files": [
+        {
+          "role": "paper",
+          "path": "raw/gaokao/2024/zhejiang-january/paper.docx",
+          "bytes": 40655,
+          "sha256": "038e7d133f52ae94b93cb6b0c25249850fde5b02033ef53705ccd377531ef2a8"
+        },
+        {
+          "role": "paper-with-answer",
+          "path": "raw/gaokao/2024/zhejiang-january/paper-with-answer.docx",
+          "bytes": 54516,
+          "sha256": "3cf994df385db032c3f39e7f83094871b6d171f34c7a510738903d564712d601"
+        },
+        {
+          "role": "listening-audio",
+          "path": "raw/gaokao/2024/zhejiang-january/listening.mp3",
+          "bytes": 7314209,
+          "sha256": "a221edca8771372720d265caf13fca8c99e731ab6f0f303fbd89e915e3012136",
+          "audio": {
+            "container": "MP3",
+            "codec": "MP3",
+            "sampleRateHz": 44100,
+            "channels": 2,
+            "channelObservation": "exact-dual-mono",
+            "bitrateKbpsApprox": 40.7,
+            "durationSeconds": 1438.119,
+            "integratedLufs": -28.4,
+            "loudnessRangeLu": 7.2,
+            "truePeakDbtp": -9.4,
+            "longSilenceSeconds": 502.817,
+            "longSilenceSegments": 114,
+            "longSilencePercent": 34.96
+          }
+        }
+      ]
+    },
+    {
+      "id": "shanghai-2025-vocational-simulation",
+      "label": "2025 年上海市高职分类考试英语听力在线模拟试运转材料",
+      "year": 2025,
+      "category": "official-simulation",
+      "provenance": "official-exam-authority",
+      "sourcePages": [
+        "https://www.shmeea.edu.cn/page/02400/20250410/19240.html",
+        "https://www.shmeea.edu.cn/download/20250408/2.mp3",
+        "https://www.shmeea.edu.cn/download/20250416/1.pdf"
+      ],
+      "rightsStatus": "officially-published-no-explicit-redistribution-license-found",
+      "validation": {
+        "answerSheetRendered": true,
+        "audioDecoded": true,
+        "notes": "作为考试机构官方发布的系统级听力样本，主要用于格式与节目时长基准，不冒充普通高考真题。"
+      },
+      "files": [
+        {
+          "role": "answer-sheet",
+          "path": "raw/gaokao/2025/shanghai-vocational-simulation/answer-sheet.pdf",
+          "bytes": 455195,
+          "sha256": "eb8037e525829c32ce710a3f23a203af4d4278d89b7cb03eeb8bd0e0e4a1f150",
+          "pages": 1
+        },
+        {
+          "role": "listening-audio",
+          "path": "raw/gaokao/2025/shanghai-vocational-simulation/listening-trial.mp3",
+          "bytes": 27905045,
+          "sha256": "da35bbeb606d8c7d25cd19aff8c92d4cb0da7e0eeaceac51621ef683b16d5d5e",
+          "audio": {
+            "container": "MP3",
+            "codec": "MP3",
+            "sampleRateHz": 44100,
+            "channels": 2,
+            "channelObservation": "exact-dual-mono",
+            "bitrateKbpsApprox": 128,
+            "durationSeconds": 1744.065,
+            "integratedLufs": -26.7,
+            "loudnessRangeLu": 9.0,
+            "truePeakDbtp": -5.2
+          }
+        }
+      ]
+    }
+  ],
+  "references": [
+    {
+      "id": "china-standards-of-english",
+      "label": "中国英语能力等级量表",
+      "source": "https://www.moe.gov.cn/jyb_sjzl/ziliao/A19/201807/W020180725662475781772.pdf",
+      "path": "reference/china-standards-of-english.pdf",
+      "bytes": 1249320,
+      "sha256": "ecde81f00cf71848efbe4443a750c9cf826e2be2397708e15d4df7f82aff6db6",
+      "pages": 110,
+      "relevantPrintedPage": 7,
+      "wpmBands": {
+        "slow": "60-80",
+        "slower": "80-100",
+        "normal": "100-140",
+        "fast": "140-180"
+      }
+    }
+  ],
+  "quarantine": [
+    {
+      "id": "mislabeled-new-ii-transcript",
+      "claimedLabel": "2024 新课标 II 听力原文",
+      "path": "quarantine/gaokao/2024/new-gaokao-2/mislabeled-transcript.pdf",
+      "bytes": 248692,
+      "sha256": "5c6af0ad6c2dfd039ff84d6c67a574751e55afd17838d0ca6231ba3c726fd875",
+      "reason": "内容以 Kate/flight 开头，与新课标 I 一致，不符合新课标 II 的 talent show 开头；禁止作为训练或验收真值。"
+    }
+  ]
+}

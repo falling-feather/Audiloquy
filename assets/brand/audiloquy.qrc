@@ -1,0 +1,6 @@
+<RCC>
+  <qresource prefix="/brand">
+    <file alias="audiloquy-icon.png">audiloquy-icon.png</file>
+    <file alias="audiloquy-icon.svg">audiloquy-icon.svg</file>
+  </qresource>
+</RCC>
