@@ -50,5 +50,6 @@ helper 调用契约：
 模型与运行时从上游直接下载，基础发行包不包含其二进制/权重；第三方许可在安装目录和 upstream source 中保留。
 
 引擎原生24kHz，helper转换为44.1kHz PCM16单声道；WPM由各声音基准校准，应用显示实测值。
+17词基准句：The museum opens at half past nine. Please arrive ten minutes early and bring your student card.
 英文智能引号/破折号会规范化，拉丁名字使用分解后的基本字母。中文等非英语符号会明确拒绝，不生成乱码语音。
 首次需网络，安装完成后不上传文稿、可离线生成。高级离线安装可给脚本传 -CacheDirectory 指向两份官方压缩包；仍验证固定SHA-256。
