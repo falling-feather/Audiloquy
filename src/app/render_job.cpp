@@ -1,4 +1,6 @@
 #include "app/render_job.h"
+#include "app/audio_import.h"
+#include "core/project_storage.h"
 
 #include "core/project.h"
 
@@ -672,13 +674,24 @@ bool renderSegment(const RenderJobRequest& request,
         return fail(error, "Rendered segment output is null");
     }
     const auto turns = parseSpeechTurns(segment);
-    if (turns.empty()) {
+    if (turns.empty() && !segment.recording) {
         return fail(error, "Segment has no speech turns");
     }
     const int pauseMs = static_cast<int>(std::llround(segment.pauseAfterSeconds * 1000.0));
 
     RenderedSpeech speech;
-    if (!renderSpeech(request,
+    if (segment.recording) {
+        const auto& recording = *segment.recording;
+        const auto source = storage::resolveResource(request.projectFile, recording.audioFile);
+        if (!inspectValidWav(source)) return fail(error, "Imported recording is missing or invalid");
+        const std::string start = std::to_string(recording.startMs);
+        const std::string end = std::to_string(recording.endMs);
+        const std::string fingerprint = fileFingerprint(source);
+        const std::string key = hashFields({"recording-range-v1", fingerprint, start, end});
+        speech.path = cacheDirectory / ("recording-" + key + ".wav");
+        if (!inspectValidWav(speech.path) &&
+            !extractRecording(source, recording.startMs, recording.endMs, speech.path, error, shouldCancel)) return false;
+    } else if (!renderSpeech(request,
                       segment,
                       cacheDirectory,
                       synthesize,
@@ -739,6 +752,16 @@ bool renderSegment(const RenderJobRequest& request,
     published.message = "Question-group audio is ready";
     report(progress, std::move(published));
     *output = RenderedSegment{segment.id, outputPath};
+    if (!segment.recording) {
+        platform::windows::WavInfo rawInfo;
+        std::string inspectionError;
+        if (platform::windows::inspectPcmWav(speech.path, &rawInfo, &inspectionError)) {
+            const double seconds = rawInfo.durationSeconds - (turns.empty() ? 0.0 : (turns.size()-1)*0.28);
+            std::size_t words = 0;
+            for (const auto& turn : turns) words += countReadableWords(turn.text);
+            if (seconds > 0 && words) output->measuredWpm = words * 60.0 / seconds;
+        }
+    }
     if (voices != nullptr) {
         voices->insert(voices->end(), speech.voices.begin(), speech.voices.end());
     }

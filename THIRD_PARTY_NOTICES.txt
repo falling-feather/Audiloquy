@@ -1,6 +1,10 @@
 English Listening Prototype - local development build
 
-This prototype uses Qt 6 libraries from the MSYS2 UCRT64 distribution.
+This application uses dynamically linked Qt 6 and runtime libraries from MSYS2 UCRT64.
+The binary distribution includes their license texts under licenses/ and an
+exact package/version/source index in licenses/runtime-dependencies.json.
+DLLs remain separate and replaceable; modifications to these libraries may be
+used with the application, subject to their respective licenses.
 Qt is available under commercial and open-source licensing options. The local
 build currently uses the open-source distribution; see:
 https://doc.qt.io/qt-6/licensing.html
@@ -13,5 +17,13 @@ https://packages.msys2.org/
 Windows Speech API and WinMM are operating-system components and are not
 redistributed by this project.
 
-This package is a local development prototype, not a public release. A formal
-SBOM and license audit remain release gates before external distribution.
+Windows Media Foundation is also an operating-system component, not redistributed.
+
+The optional Kokoro pack is downloaded separately from pinned upstream releases.
+Kokoro weights: Apache-2.0; sherpa-onnx runtime includes additional third-party
+components including GPL phonemization code. Those executables are not linked
+into or included in the base application archive. Their source and notices are
+listed by the installer in the independent voice-pack directory.
+
+Audiloquy is a development/test release. Its own source has no general-purpose
+open-source license assigned; third-party components retain their licenses.

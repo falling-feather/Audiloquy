@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace {
 
@@ -67,16 +68,26 @@ Project sampleProject() {
         },
     };
     project.segments.front().renderedAudioFile = "C:/portable/result/questions-6-7.wav";
-    project.segments.front().generation = listening::GenerationRecord{
-        "deepseek",
-        "deepseek-chat",
+    listening::GenerationRecord generation;
+    generation.provider = "deepseek";
+    generation.model = "deepseek-chat";
+    static_cast<listening::GenerationQuestion&>(generation) = listening::GenerationQuestion{
         "When will the tour begin?",
         {"At nine.", "At ten.", "At eleven."},
         "B",
         {listening::GenerationEvidence{"B", "supports", "turn-3", "at ten"}},
-        true,
-        false,
     };
+    generation.additionalQuestions.push_back(listening::GenerationQuestion{
+        "Where will the tour begin?",
+        {"At the station.", "At the museum.", "At the airport."},
+        "B",
+        {listening::GenerationEvidence{"B", "supports", "turn-3", "at the museum"}},
+    });
+    generation.requiresTeacherReview = true;
+    generation.teacherReviewed = false;
+    project.segments.front().generation = std::move(generation);
+    project.segments.front().recording = listening::RecordingSource{
+        "C:/portable/source/original.wav", 1200, 8800};
     return project;
 }
 
@@ -103,6 +114,19 @@ void jsonRoundTripPreservesUtf8AndEscapes() {
     expect(decoded.title == "\xe4\xbd\xa0\xe5\xa5\xbd \xf0\x9f\x98\x83", "Unicode escapes must decode to UTF-8");
     expect(decoded.segments.front().speaker == "Ren\xc3\xa9" "e", "BMP escape must decode to UTF-8");
     expect(decoded.segments.front().text.find("\n") != std::string::npos, "escaped newline must decode");
+    expect(decoded.segments.front().generation == std::nullopt &&
+               !decoded.segments.front().recording.has_value(),
+           "schema 1 migration must default new schema 3 metadata to empty");
+
+    const std::string schema2 =
+        R"({"schemaVersion":2,"id":"schema2","title":"Schema 2","accent":"en-US","targetWpm":120,"voiceSettings":{"maleVoiceTokenId":"m","femaleVoiceTokenId":"f","strictAccent":true,"allowGenderFallback":false},"segments":[{"id":"s1","questionStart":1,"questionEnd":1,"speaker":"A","text":"MAN: At ten.","pauseAfterSeconds":0,"repeatCount":1,"renderedAudioFile":"old.wav","generation":{"provider":"local-template","model":"","questionStem":"When?","options":["At nine","At ten","At eleven"],"correctAnswer":"B","requiresTeacherReview":true,"teacherReviewed":false,"evidence":[{"option":"B","role":"supports","turnId":"turn-01","quote":"At ten"}]}}],"renderedProgramFile":""})";
+    const Project migratedSchema2 = listening::fromJson(schema2);
+    expect(migratedSchema2.schemaVersion == Project::currentSchemaVersion,
+           "schema 2 documents must migrate to schema 3");
+    expect(migratedSchema2.segments.front().generation.has_value() &&
+               migratedSchema2.segments.front().generation->additionalQuestions.empty() &&
+               !migratedSchema2.segments.front().recording.has_value(),
+           "schema 2 migration must default additional questions and recording");
 }
 
 void fileRoundTripWorks() {
@@ -135,6 +159,19 @@ void validationFindsBadInput() {
     expectThrows<listening::ProjectFormatError>(
         [&] { (void)listening::toJson(project); },
         "serialization must not persist invalid projects");
+
+    Project recordingOnly = sampleProject();
+    recordingOnly.segments.front().text.clear();
+    expect(listening::validate(recordingOnly).empty(),
+           "a valid recording range may back an empty segment text");
+    recordingOnly.segments.front().recording->endMs = recordingOnly.segments.front().recording->startMs;
+    expect(!listening::validate(recordingOnly).empty(),
+           "recording ranges must have positive duration");
+    recordingOnly = sampleProject();
+    recordingOnly.segments.front().recording->endMs =
+        recordingOnly.segments.front().recording->startMs + 2ULL * 60ULL * 60ULL * 1000ULL + 1ULL;
+    expect(!listening::validate(recordingOnly).empty(),
+           "recording ranges must have a safe maximum duration");
 
     expectThrows<listening::ProjectFormatError>(
         [] {

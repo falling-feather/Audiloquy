@@ -1,4 +1,6 @@
 #include "app/main_window.h"
+#include "app/audio_import.h"
+#include "app/recording_marker_dialog.h"
 #include "app/scenario_dialog.h"
 #include "app/styled_message_dialog.h"
 
@@ -13,6 +15,7 @@
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDesktopServices>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
@@ -29,18 +32,24 @@
 #include <QListWidgetItem>
 #include <QMouseEvent>
 #include <QPushButton>
+#include <QProgressDialog>
+#include <QProcess>
+#include <QRegularExpression>
 #include <QScrollArea>
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QSlider>
+#include <QStackedWidget>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStandardPaths>
 #include <QStyle>
 #include <QStringList>
 #include <QTextEdit>
+#include <QTextBrowser>
 #include <QTimer>
+#include <QThread>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -116,8 +125,11 @@ bool isSmokeRun() {
     return arguments.contains(QStringLiteral("--smoke-test")) ||
            arguments.contains(QStringLiteral("--preview-smoke-test")) ||
            arguments.contains(QStringLiteral("--scenario-smoke-test")) ||
+           arguments.contains(QStringLiteral("--scenario-multi-smoke-test")) ||
            arguments.contains(QStringLiteral("--deepseek-live-smoke-test")) ||
            arguments.contains(QStringLiteral("--workflow-smoke-test")) ||
+           arguments.contains(QStringLiteral("--recording-smoke-test")) ||
+           arguments.contains(QStringLiteral("--classroom-smoke-test")) ||
            arguments.contains(QStringLiteral("--editor-smoke-test"));
 }
 
@@ -235,6 +247,16 @@ MainWindow::MainWindow(QWidget* parent)
 }
 
 MainWindow::~MainWindow() {
+    if (recordingImportCancel_) {
+        recordingImportCancel_->store(true, std::memory_order_relaxed);
+    }
+    if (recordingImportThread_ != nullptr) {
+        recordingImportThread_->wait();
+    }
+    if (voicePackInstallProcess_ != nullptr) {
+        voicePackInstallProcess_->kill();
+        voicePackInstallProcess_->waitForFinished(1000);
+    }
     player_.stop();
 }
 
@@ -352,6 +374,11 @@ void MainWindow::buildUi() {
     rhythmStepButton_ = makeStepButton(QStringLiteral("03"), QStringLiteral("节奏"));
     generateStepButton_ = makeStepButton(QStringLiteral("04"), QStringLiteral("生成"));
     classroomStepButton_ = makeStepButton(QStringLiteral("05"), QStringLiteral("课堂"));
+    manuscriptStepButton_->setObjectName(QStringLiteral("manuscriptStepButton"));
+    voiceStepButton_->setObjectName(QStringLiteral("voiceStepButton"));
+    rhythmStepButton_->setObjectName(QStringLiteral("rhythmStepButton"));
+    generateStepButton_->setObjectName(QStringLiteral("generateStepButton"));
+    classroomStepButton_->setObjectName(QStringLiteral("classroomStepButton"));
     manuscriptStepButton_->setChecked(true);
     auto* workflowGroup = new QButtonGroup(this);
     workflowGroup->setExclusive(true);
@@ -603,10 +630,15 @@ void MainWindow::buildUi() {
     auto* voicePackTools = new QHBoxLayout;
     auto* openVoicePacksButton = new QPushButton(QStringLiteral("打开声音包目录"), globalSettingsCard_);
     auto* rescanVoicePacksButton = new QPushButton(QStringLiteral("重新扫描音色"), globalSettingsCard_);
+    installVoicePackButton_ =
+        new QPushButton(QStringLiteral("安装神经音色"), globalSettingsCard_);
+    installVoicePackButton_->setObjectName(QStringLiteral("installVoicePackButton"));
     openVoicePacksButton->setProperty("quietButton", true);
     rescanVoicePacksButton->setProperty("quietButton", true);
+    installVoicePackButton_->setProperty("accentButton", true);
     voicePackTools->addWidget(openVoicePacksButton);
     voicePackTools->addWidget(rescanVoicePacksButton);
+    voicePackTools->addWidget(installVoicePackButton_);
     voicePackTools->addStretch();
     globalGrid->addLayout(voicePackTools, 11, 0, 1, 2);
     connect(openVoicePacksButton, &QPushButton::clicked, this, [this] {
@@ -621,6 +653,8 @@ void MainWindow::buildUi() {
         commitProjectSettings();
         showStatus(QStringLiteral("已重新扫描 Windows 音色与本地声音包"));
     });
+    connect(installVoicePackButton_, &QPushButton::clicked, this,
+            [this] { installNeuralVoicePack(); });
     auto* durationCaption = mutedLabel(QStringLiteral("预估整套时长"), globalSettingsCard_);
     totalDurationLabel_ = new QLabel(globalSettingsCard_);
     totalDurationLabel_->setObjectName(QStringLiteral("metricPill"));
@@ -670,8 +704,27 @@ void MainWindow::buildUi() {
     auto* textLabel = new QLabel(QStringLiteral("英文台词"), editorCard_);
     textLabel->setObjectName(QStringLiteral("fieldLabel"));
     wordCountLabel_ = mutedLabel(QString(), editorCard_);
+    recordingSourceLabel_ = mutedLabel(QString(), editorCard_);
+    recordingSourceLabel_->setObjectName(QStringLiteral("recordingSourceLabel"));
+    editRecordingButton_ = new QPushButton(QStringLiteral("编辑标记"), editorCard_);
+    editRecordingButton_->setObjectName(QStringLiteral("editRecordingButton"));
+    editRecordingButton_->setProperty("quietButton", true);
+    editRecordingButton_->setVisible(false);
+    clearRecordingButton_ = new QPushButton(QStringLiteral("改用文稿合成"), editorCard_);
+    clearRecordingButton_->setObjectName(QStringLiteral("clearRecordingButton"));
+    clearRecordingButton_->setProperty("quietButton", true);
+    clearRecordingButton_->setToolTip(QStringLiteral("解除录音引用，不删除已导入的源文件"));
+    clearRecordingButton_->setVisible(false);
+    reviewGenerationButton_ = new QPushButton(QStringLiteral("查看题目与证据"), editorCard_);
+    reviewGenerationButton_->setObjectName(QStringLiteral("viewGenerationButton"));
+    reviewGenerationButton_->setProperty("quietButton", true);
+    reviewGenerationButton_->setEnabled(false);
     textHeader->addWidget(textLabel);
     textHeader->addStretch();
+    textHeader->addWidget(recordingSourceLabel_);
+    textHeader->addWidget(editRecordingButton_);
+    textHeader->addWidget(clearRecordingButton_);
+    textHeader->addWidget(reviewGenerationButton_);
     textHeader->addWidget(wordCountLabel_);
     editorLayout->addLayout(textHeader);
     scriptEdit_ = new QTextEdit(editorCard_);
@@ -828,7 +881,103 @@ void MainWindow::buildUi() {
     bodySplitter->setStretchFactor(1, 1);
     bodySplitter->setStretchFactor(2, 0);
     bodySplitter->setSizes({270, 720, 350});
-    rootLayout->addWidget(bodySplitter, 1);
+
+    centerStack_ = new QStackedWidget(root);
+    centerStack_->setObjectName(QStringLiteral("centerStack"));
+    centerStack_->addWidget(bodySplitter);
+
+    classroomPage_ = new QWidget(centerStack_);
+    classroomPage_->setObjectName(QStringLiteral("classroomPage"));
+    classroomPage_->setFocusPolicy(Qt::StrongFocus);
+    auto* classroomLayout = new QVBoxLayout(classroomPage_);
+    classroomLayout->setContentsMargins(28, 22, 28, 24);
+    classroomLayout->setSpacing(16);
+
+    auto* classroomHeader = new QHBoxLayout;
+    classroomHeader->setSpacing(12);
+    auto* classroomHeading = new QVBoxLayout;
+    classroomHeading->setSpacing(3);
+    classroomProjectLabel_ = new QLabel(QStringLiteral("课堂播放"), classroomPage_);
+    classroomProjectLabel_->setObjectName(QStringLiteral("classroomProjectLabel"));
+    classroomHeading->addWidget(classroomProjectLabel_);
+    classroomHeading->addWidget(mutedLabel(
+        QStringLiteral("仅显示题号与播放状态，答案和备课内容在课堂模式中隐藏。"),
+        classroomPage_));
+    classroomHeader->addLayout(classroomHeading, 1);
+    classroomReturnButton_ = new QPushButton(QStringLiteral("返回备课"), classroomPage_);
+    classroomReturnButton_->setObjectName(QStringLiteral("classroomReturnButton"));
+    classroomReturnButton_->setProperty("quietButton", true);
+    importRecordingButton_ =
+        new QPushButton(QStringLiteral("导入并标记录音"), classroomPage_);
+    importRecordingButton_->setObjectName(QStringLiteral("importRecordingButton"));
+    importRecordingButton_->setProperty("accentButton", true);
+    classroomHeader->addWidget(importRecordingButton_, 0, Qt::AlignTop);
+    classroomHeader->addWidget(classroomReturnButton_, 0, Qt::AlignTop);
+    classroomLayout->addLayout(classroomHeader);
+
+    auto* classroomBody = new QHBoxLayout;
+    classroomBody->setSpacing(16);
+    auto* classroomQueueCard = makeCard(classroomPage_);
+    auto* classroomQueueLayout = new QVBoxLayout(classroomQueueCard);
+    classroomQueueLayout->setContentsMargins(18, 16, 18, 16);
+    classroomQueueLayout->setSpacing(10);
+    auto* classroomQueueTitle = sectionTitle(QStringLiteral("题组队列"), classroomQueueCard);
+    classroomQueueLayout->addWidget(classroomQueueTitle);
+    classroomQueueLayout->addWidget(mutedLabel(
+        QStringLiteral("当前选中与正在播放会分别标记。"), classroomQueueCard));
+    classroomSegmentList_ = new QListWidget(classroomQueueCard);
+    classroomSegmentList_->setObjectName(QStringLiteral("classroomSegmentList"));
+    classroomSegmentList_->setSelectionMode(QAbstractItemView::SingleSelection);
+    classroomSegmentList_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    classroomSegmentList_->setSpacing(6);
+    classroomQueueLayout->addWidget(classroomSegmentList_, 1);
+    classroomBody->addWidget(classroomQueueCard, 0);
+
+    auto* classroomFocusCard = makeCard(classroomPage_);
+    auto* classroomFocusLayout = new QVBoxLayout(classroomFocusCard);
+    classroomFocusLayout->setContentsMargins(28, 24, 28, 26);
+    classroomFocusLayout->setSpacing(12);
+    auto* classroomFocusCaption = mutedLabel(QStringLiteral("当前题组"), classroomFocusCard);
+    classroomFocusCaption->setAlignment(Qt::AlignCenter);
+    classroomFocusLayout->addWidget(classroomFocusCaption);
+    classroomQuestionLabel_ = new QLabel(QStringLiteral("未选择题组"), classroomFocusCard);
+    classroomQuestionLabel_->setObjectName(QStringLiteral("classroomQuestionLabel"));
+    classroomQuestionLabel_->setAlignment(Qt::AlignCenter);
+    classroomQuestionLabel_->setWordWrap(true);
+    classroomFocusLayout->addWidget(classroomQuestionLabel_);
+    classroomStateLabel_ = new QLabel(QStringLiteral("准备播放"), classroomFocusCard);
+    classroomStateLabel_->setObjectName(QStringLiteral("classroomStateLabel"));
+    classroomStateLabel_->setAlignment(Qt::AlignCenter);
+    classroomFocusLayout->addWidget(classroomStateLabel_);
+    classroomDetailLabel_ = mutedLabel(QStringLiteral("选择题组后开始播放"), classroomFocusCard);
+    classroomDetailLabel_->setAlignment(Qt::AlignCenter);
+    classroomFocusLayout->addWidget(classroomDetailLabel_);
+    auto* classroomControls = new QHBoxLayout;
+    classroomControls->setSpacing(8);
+    classroomPreviousButton_ = new QPushButton(QStringLiteral("上一组"), classroomFocusCard);
+    classroomPlayButton_ = new QPushButton(QStringLiteral("▶  播放"), classroomFocusCard);
+    classroomLoopButton_ = new QPushButton(QStringLiteral("↻  循环"), classroomFocusCard);
+    classroomPlayAllButton_ = new QPushButton(QStringLiteral("播放整套"), classroomFocusCard);
+    classroomNextButton_ = new QPushButton(QStringLiteral("下一组"), classroomFocusCard);
+    classroomPreviousButton_->setObjectName(QStringLiteral("classroomPreviousButton"));
+    classroomPlayButton_->setObjectName(QStringLiteral("classroomPlayButton"));
+    classroomLoopButton_->setObjectName(QStringLiteral("classroomLoopButton"));
+    classroomPlayAllButton_->setObjectName(QStringLiteral("classroomPlayAllButton"));
+    classroomNextButton_->setObjectName(QStringLiteral("classroomNextButton"));
+    classroomPlayButton_->setProperty("primaryButton", true);
+    classroomLoopButton_->setProperty("accentButton", true);
+    for (auto* button : {classroomPreviousButton_, classroomPlayButton_, classroomLoopButton_,
+                         classroomPlayAllButton_, classroomNextButton_}) {
+        classroomControls->addWidget(button);
+    }
+    classroomFocusLayout->addLayout(classroomControls);
+    classroomFocusLayout->addStretch(1);
+    classroomBody->addWidget(classroomFocusCard, 1);
+    classroomLayout->addLayout(classroomBody, 1);
+
+    centerStack_->addWidget(classroomPage_);
+    centerStack_->setCurrentWidget(bodySplitter);
+    rootLayout->addWidget(centerStack_, 1);
 
     playerBar_ = new QFrame(root);
     playerBar_->setObjectName(QStringLiteral("playerBar"));
@@ -920,7 +1069,7 @@ void MainWindow::connectUi() {
     connect(generateStepButton_, &QPushButton::clicked, this,
             [this] { activateWorkflowStep(3); });
     connect(classroomStepButton_, &QPushButton::clicked, this,
-            [this] { activateWorkflowStep(4); });
+            [this] { setClassroomMode(true); });
     connect(smartScenarioButton_, &QPushButton::clicked, this,
             [this] { openScenarioGenerator(); });
     connect(simpleModeButton_, &QPushButton::clicked, this,
@@ -950,6 +1099,71 @@ void MainWindow::connectUi() {
             [this] { redoEdit(); });
     connect(packageButton_, &QPushButton::clicked, this,
             [this] { packageProjectToDisk(); });
+    connect(classroomReturnButton_, &QPushButton::clicked, this,
+            [this] { setClassroomMode(false); });
+    connect(importRecordingButton_, &QPushButton::clicked, this,
+            [this] { openRecordingImportDialog(); });
+    connect(editRecordingButton_, &QPushButton::clicked, this, [this] {
+        const Segment* segment = currentSegment();
+        if (segment == nullptr || !segment->recording.has_value()) {
+            return;
+        }
+        const auto source = storage::resolveResource(projectPath_,
+                                                     segment->recording->audioFile);
+        audio::WavInfo info;
+        std::string error;
+        if (!audio::inspectPcmWav(source, &info, &error) || info.sampleRate == 0) {
+            showStatus(QStringLiteral("无法读取已标记录音：%1").arg(qString(error)), true);
+            return;
+        }
+        const ImportedAudio imported{
+            source,
+            static_cast<std::uint64_t>((info.frameCount * 1000U) / info.sampleRate)};
+        openRecordingMarker(imported, segment->id);
+    });
+    connect(clearRecordingButton_, &QPushButton::clicked, this, [this] {
+        Segment* segment = currentSegment();
+        if (segment == nullptr || !segment->recording.has_value()) {
+            return;
+        }
+        segment->recording.reset();
+        invalidateCurrentRenderedAudio();
+        history_.adoptCurrent(project_, currentSegmentId_);
+        setDirty();
+        refreshSegmentList();
+        updateMetrics();
+        updateAudioAvailability();
+        showStatus(QStringLiteral("已解除录音引用，后续将按文稿合成；源文件未删除"));
+    });
+    connect(reviewGenerationButton_, &QPushButton::clicked, this,
+            [this] { openGenerationReviewDialog(); });
+    connect(classroomPlayButton_, &QPushButton::clicked, this,
+            [this] { playSelected(false); });
+    connect(classroomLoopButton_, &QPushButton::clicked, this,
+            [this] { playSelected(true); });
+    connect(classroomPlayAllButton_, &QPushButton::clicked, this,
+            [this] { playAll(); });
+    connect(classroomPreviousButton_, &QPushButton::clicked, this,
+            [this] { moveSelection(-1); });
+    connect(classroomNextButton_, &QPushButton::clicked, this,
+            [this] { moveSelection(1); });
+    connect(classroomSegmentList_, &QListWidget::currentRowChanged, this, [this](int row) {
+        if (loadingUi_ || row < 0 || row >= segmentList_->count()) {
+            return;
+        }
+        if (auto* item = classroomSegmentList_->item(row)) {
+            const std::string id = utf8(item->data(Qt::UserRole).toString());
+            if (id != currentSegmentId_) {
+                currentSegmentId_ = id;
+                segmentList_->setCurrentRow(row);
+                loadCurrentSegment();
+                updateMetrics();
+                updateAudioAvailability();
+            }
+        }
+        classroomPage_->setFocus(Qt::OtherFocusReason);
+        updateClassroomView();
+    });
 
     connect(segmentList_, &QListWidget::currentRowChanged, this, [this](int row) {
         if (loadingUi_ || row < 0) {
@@ -1172,6 +1386,33 @@ void MainWindow::connectUi() {
             [this] { (void)saveProjectToDisk(true); });
     auto* stopShortcut = new QShortcut(QKeySequence(Qt::Key_Escape), this);
     connect(stopShortcut, &QShortcut::activated, this, [this] { stopPlayback(); });
+
+    auto* classroomSpaceShortcut = new QShortcut(QKeySequence(Qt::Key_Space), classroomPage_);
+    classroomSpaceShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(classroomSpaceShortcut, &QShortcut::activated, this, [this] {
+        if (classroomMode_) {
+            const auto snapshot = player_.snapshot();
+            if (snapshot.state == platform::windows::WavPlayer::State::Stopped) {
+                playSelected(false);
+            } else {
+                togglePlaybackPause();
+            }
+        }
+    });
+    auto* classroomLeftShortcut = new QShortcut(QKeySequence(Qt::Key_Left), classroomPage_);
+    classroomLeftShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(classroomLeftShortcut, &QShortcut::activated, this, [this] {
+        if (classroomMode_) {
+            moveSelection(-1);
+        }
+    });
+    auto* classroomRightShortcut = new QShortcut(QKeySequence(Qt::Key_Right), classroomPage_);
+    classroomRightShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(classroomRightShortcut, &QShortcut::activated, this, [this] {
+        if (classroomMode_) {
+            moveSelection(1);
+        }
+    });
 }
 
 void MainWindow::applyTheme() {
@@ -1182,7 +1423,7 @@ void MainWindow::applyTheme() {
             color: #273047;
         }
         QWidget#appRoot, QWidget#workspace, QWidget#scrollContents,
-        QWidget#inspectorContents, QScrollArea#inspectorScroll {
+        QWidget#inspectorContents, QWidget#classroomPage, QScrollArea#inspectorScroll {
             background: #F7F5EF;
         }
         QWidget#appRoot {
@@ -1345,6 +1586,51 @@ void MainWindow::applyTheme() {
             border: 1px solid #bfc5ec;
             color: #3f4baa;
         }
+        QLabel#classroomProjectLabel {
+            color: #20283e;
+            font-size: 19pt;
+            font-weight: 700;
+        }
+        QListWidget#classroomSegmentList {
+            background: transparent;
+            border: none;
+            outline: none;
+            min-width: 210px;
+        }
+        QListWidget#classroomSegmentList::item {
+            background: #fffefa;
+            border: 1px solid #e5dfd5;
+            border-radius: 10px;
+            padding: 12px 12px;
+            color: #455269;
+        }
+        QListWidget#classroomSegmentList::item:hover { background: #f3f2f8; border-color: #d9d7e6; }
+        QListWidget#classroomSegmentList::item:selected {
+            background: #eef0fc;
+            border: 1px solid #bfc5ec;
+            color: #3f4baa;
+        }
+        QLabel#classroomQuestionLabel {
+            color: #20283e;
+            font-size: 34pt;
+            font-weight: 700;
+            padding: 22px 10px;
+        }
+        QLabel#classroomStateLabel {
+            color: #117c6e;
+            font-size: 13pt;
+            font-weight: 700;
+        }
+        QWidget#classroomPage QFrame#card { background: #fffefa; border-color: #e1ddd5; }
+        QWidget#classroomPage QPushButton#classroomPlayButton {
+            min-height: 48px;
+            min-width: 112px;
+            font-size: 12pt;
+        }
+        QWidget#classroomPage QPushButton#classroomLoopButton {
+            min-height: 48px;
+            min-width: 94px;
+        }
         QScrollArea#workspaceScroll { border: none; background: #f7f5ef; }
         QLabel#eyebrow {
             color: #4652b8;
@@ -1362,6 +1648,7 @@ void MainWindow::applyTheme() {
         QLabel#cardStepLabel { color: #117c6e; font-size: 8pt; font-weight: 700; letter-spacing: 1px; }
         QFrame#professionalCard { border-color: #cdd1ef; background: #fbfbff; }
         QLabel#fieldLabel { color: #465269; font-size: 9pt; font-weight: 600; }
+        QLabel#recordingSourceLabel { color: #117c6e; font-size: 8pt; }
         QLabel#voiceAuditLabel {
             color: #536078;
             background: #F3F7F6;
@@ -1846,8 +2133,13 @@ void MainWindow::setEditorWidgetsEnabled(bool enabled) {
                             static_cast<QWidget*>(scriptEdit_),
                             static_cast<QWidget*>(pauseSpin_),
                             static_cast<QWidget*>(repeatSpin_),
+                            static_cast<QWidget*>(editRecordingButton_),
+                            static_cast<QWidget*>(clearRecordingButton_),
+                            static_cast<QWidget*>(reviewGenerationButton_),
                             static_cast<QWidget*>(smartScenarioButton_),
-                            static_cast<QWidget*>(packageButton_)}) {
+                            static_cast<QWidget*>(packageButton_),
+                            static_cast<QWidget*>(importRecordingButton_),
+                            static_cast<QWidget*>(installVoicePackButton_)}) {
         if (widget != nullptr) {
             widget->setEnabled(enabled);
         }
@@ -1920,7 +2212,492 @@ void MainWindow::refreshSegmentList() {
     }
     segmentList_->setCurrentRow(selectedRow);
     loadingUi_ = false;
+    refreshClassroomList();
     loadCurrentSegment();
+}
+
+void MainWindow::refreshClassroomList() {
+    if (classroomSegmentList_ == nullptr) {
+        return;
+    }
+    const QSignalBlocker blocker(classroomSegmentList_);
+    classroomSegmentList_->clear();
+    int selectedRow = -1;
+    for (std::size_t index = 0; index < project_.segments.size(); ++index) {
+        const Segment& segment = project_.segments[index];
+        const auto wav = segmentWavs_.find(segment.id);
+        const bool generated = wav != segmentWavs_.end() && std::filesystem::exists(wav->second);
+        const bool selected = segment.id == currentSegmentId_;
+        const bool playing = segment.id == playingSegmentId_;
+        const QString marker = playing ? QStringLiteral("▶  ")
+                                       : selected ? QStringLiteral("●  ")
+                                                  : QStringLiteral("○  ");
+        const QString state = playing ? QStringLiteral("正在播放")
+                                      : generated ? QStringLiteral("可播放")
+                                                   : QStringLiteral("待生成");
+        auto* item = new QListWidgetItem(
+            QStringLiteral("%1%2\n     %3  ·  %4")
+                .arg(marker)
+                .arg(questionLabel(segment))
+                .arg(state)
+                .arg(qString(segment.speaker)),
+            classroomSegmentList_);
+        item->setData(Qt::UserRole, qString(segment.id));
+        item->setSizeHint(QSize(0, 68));
+        if (selected) {
+            selectedRow = static_cast<int>(index);
+        }
+    }
+    classroomSegmentList_->setCurrentRow(selectedRow);
+    updateClassroomView();
+}
+
+void MainWindow::updateClassroomView() {
+    if (classroomPage_ == nullptr) {
+        return;
+    }
+    classroomProjectLabel_->setText(qString(project_.title).isEmpty()
+                                        ? QStringLiteral("课堂播放")
+                                        : qString(project_.title));
+    const Segment* segment = currentSegment();
+    const bool hasSegment = segment != nullptr;
+    const bool hasAudio = hasSegment && [&] {
+        const auto found = segmentWavs_.find(segment->id);
+        return found != segmentWavs_.end() && std::filesystem::exists(found->second);
+    }();
+    classroomQuestionLabel_->setText(hasSegment ? questionLabel(*segment)
+                                                : QStringLiteral("未选择题组"));
+    std::string error;
+    const auto snapshot = player_.snapshot(&error);
+    const Segment* playingSegment = playingSegmentId_.empty()
+                                        ? nullptr
+                                        : project_.findSegment(playingSegmentId_);
+    if (playingWholeProgram_ && snapshot.state == platform::windows::WavPlayer::State::Playing) {
+        classroomStateLabel_->setText(QStringLiteral("正在播放整套听力"));
+    } else if (snapshot.state == platform::windows::WavPlayer::State::Paused) {
+        classroomStateLabel_->setText(
+            playingWholeProgram_
+                ? QStringLiteral("已暂停 · 整套听力 · 按空格继续")
+                : playingSegment != nullptr
+                      ? QStringLiteral("已暂停 · %1 · 按空格继续")
+                            .arg(questionLabel(*playingSegment))
+                      : QStringLiteral("已暂停 · 按空格继续"));
+    } else if (!playingSegmentId_.empty() &&
+               snapshot.state == platform::windows::WavPlayer::State::Playing) {
+        classroomStateLabel_->setText(
+            playingSegment == nullptr
+                ? QStringLiteral("正在播放当前题组")
+                : QStringLiteral("正在播放 · %1").arg(questionLabel(*playingSegment)));
+    } else if (!playingSegmentId_.empty() &&
+               snapshot.state == platform::windows::WavPlayer::State::Stopped) {
+        classroomStateLabel_->setText(
+            playingSegment == nullptr
+                ? QStringLiteral("当前题组播放完成")
+                : QStringLiteral("%1 播放完成").arg(questionLabel(*playingSegment)));
+    } else {
+        classroomStateLabel_->setText(QStringLiteral("准备播放"));
+    }
+    if (hasSegment) {
+        if (segment->recording.has_value()) {
+            const RecordingSource& recording = *segment->recording;
+            classroomDetailLabel_->setText(
+                QStringLiteral("原录音 · 按原速播放 · 起止 %1–%2 ms · %3")
+                    .arg(static_cast<qulonglong>(recording.startMs))
+                    .arg(static_cast<qulonglong>(recording.endMs))
+                    .arg(hasAudio ? QStringLiteral("已有音频") : QStringLiteral("尚未生成")));
+        } else {
+            classroomDetailLabel_->setText(
+                QStringLiteral("%1 · %2 WPM · %3 · %4")
+                    .arg(qString(segment->speaker))
+                    .arg(static_cast<int>(std::lround(project_.targetWpm)))
+                    .arg(project_.accent == Accent::American ? QStringLiteral("en-US")
+                                                             : QStringLiteral("en-GB"))
+                    .arg(hasAudio ? QStringLiteral("已有音频") : QStringLiteral("尚未生成")));
+        }
+    } else {
+        classroomDetailLabel_->setText(QStringLiteral("请先在备课模式中建立题组"));
+    }
+    const bool enabled = hasSegment && !busy_;
+    classroomPlayButton_->setEnabled(enabled && hasAudio);
+    classroomLoopButton_->setEnabled(enabled && hasAudio);
+    classroomPreviousButton_->setEnabled(!busy_ && classroomSegmentList_->currentRow() > 0);
+    classroomNextButton_->setEnabled(
+        !busy_ && classroomSegmentList_->currentRow() + 1 < classroomSegmentList_->count());
+    const bool hasProgram = !programWav_.empty() && std::filesystem::exists(programWav_);
+    classroomPlayAllButton_->setEnabled(!busy_ && hasProgram);
+}
+
+void MainWindow::setClassroomMode(bool enabled) {
+    if (centerStack_ == nullptr || classroomPage_ == nullptr) {
+        return;
+    }
+    if (enabled == classroomMode_) {
+        if (enabled) {
+            classroomPage_->setFocus(Qt::OtherFocusReason);
+        }
+        return;
+    }
+    if (!enabled) {
+        classroomMode_ = false;
+        centerStack_->setCurrentWidget(centerStack_->widget(0));
+        workflowStep_ = 0;
+        manuscriptStepButton_->setChecked(true);
+        playerBar_->setProperty("activeStep", false);
+        playerBar_->style()->unpolish(playerBar_);
+        playerBar_->style()->polish(playerBar_);
+        playerBar_->update();
+        updatePageContext();
+        showStatus(QStringLiteral("已返回备课模式"));
+        return;
+    }
+    commitProjectSettings();
+    commitCurrentSegment();
+    classroomMode_ = true;
+    workflowStep_ = 4;
+    classroomStepButton_->setChecked(true);
+    centerStack_->setCurrentWidget(classroomPage_);
+    playerBar_->setProperty("activeStep", true);
+    playerBar_->style()->unpolish(playerBar_);
+    playerBar_->style()->polish(playerBar_);
+    playerBar_->update();
+    refreshClassroomList();
+    classroomPage_->setFocus(Qt::OtherFocusReason);
+    updatePageContext();
+    showStatus(QStringLiteral("已进入课堂模式 · 空格播放/暂停，← → 切换题组"));
+}
+
+void MainWindow::openRecordingImportDialog() {
+    if (busy_ || recordingImportThread_ != nullptr) {
+        return;
+    }
+    const QString source = QFileDialog::getOpenFileName(
+        this, QStringLiteral("导入课堂录音"), QDir::homePath(),
+        QStringLiteral("音频文件 (*.wav *.mp3 *.m4a *.wma);;所有文件 (*.*)"));
+    if (source.isEmpty()) {
+        return;
+    }
+    beginRecordingImport(nativePath(source));
+}
+
+void MainWindow::beginRecordingImport(const std::filesystem::path& source) {
+    if (recordingImportThread_ != nullptr || busy_) {
+        return;
+    }
+    if (!std::filesystem::exists(source)) {
+        showStatus(QStringLiteral("录音文件不存在：%1").arg(qPath(source)), true);
+        return;
+    }
+    std::filesystem::path destination;
+    try {
+        destination = outputDirectory() / "sources";
+        std::filesystem::create_directories(destination);
+    } catch (const std::exception& error) {
+        showFailure(QStringLiteral("无法准备录音保存目录"), error);
+        return;
+    }
+
+    const auto result = std::make_shared<ImportedAudio>();
+    const auto error = std::make_shared<std::string>();
+    recordingImportCancel_ = std::make_shared<std::atomic_bool>(false);
+    const auto cancel = recordingImportCancel_;
+    auto* progress = new QProgressDialog(QStringLiteral("正在导入并归一化录音…"),
+                                         QStringLiteral("取消"), 0, 0, this);
+    progress->setWindowTitle(QStringLiteral("导入录音"));
+    progress->setWindowModality(Qt::WindowModal);
+    progress->setAutoClose(false);
+    progress->setAutoReset(false);
+    recordingImportProgress_ = progress;
+    connect(progress, &QProgressDialog::canceled, this, [this, cancel] {
+        cancel->store(true, std::memory_order_relaxed);
+        showStatus(QStringLiteral("正在取消录音导入…"));
+    });
+
+    auto* worker = QThread::create([source, destination, result, error, cancel] {
+        (void)importRecording(source, destination, result.get(), error.get(),
+                              [cancel] { return cancel->load(std::memory_order_relaxed); });
+    });
+    recordingImportThread_ = worker;
+    connect(worker, &QThread::finished, this,
+            [this, worker, result, error, cancel] {
+                if (recordingImportProgress_ != nullptr) {
+                    const QSignalBlocker blocker(recordingImportProgress_);
+                    recordingImportProgress_->close();
+                    recordingImportProgress_->deleteLater();
+                    recordingImportProgress_ = nullptr;
+                }
+                recordingImportThread_ = nullptr;
+                const bool cancelled = cancel->load(std::memory_order_relaxed);
+                const bool success = !result->path.empty() && result->durationMs > 0 &&
+                                     error->empty() && !cancelled;
+                worker->deleteLater();
+                endBusy();
+                recordingImportCancel_.reset();
+                if (cancelled) {
+                    showStatus(QStringLiteral("录音导入已取消"));
+                    return;
+                }
+                if (!success) {
+                    showFailure(QStringLiteral("录音导入失败"),
+                                std::runtime_error(error->empty()
+                                                       ? "Audio import failed"
+                                                       : *error));
+                    return;
+                }
+                showStatus(QStringLiteral("录音已归一化，正在设置题段"));
+                openRecordingMarker(*result);
+            });
+    beginBusy(QStringLiteral("正在后台导入录音…"));
+    progress->show();
+    worker->start();
+}
+
+void MainWindow::openRecordingMarker(const ImportedAudio& imported,
+                                     const std::string& preferredSegmentId) {
+    std::vector<std::pair<std::string, QString>> choices;
+    choices.reserve(project_.segments.size());
+    for (const Segment& segment : project_.segments) {
+        choices.emplace_back(segment.id, questionLabel(segment));
+    }
+    if (choices.empty()) {
+        showStatus(QStringLiteral("当前工程没有题组，无法标记录音"), true);
+        return;
+    }
+
+    RecordingMarkerDialog dialog(imported.path, imported.durationMs, std::move(choices), this);
+    dialog.selectSegment(preferredSegmentId.empty() ? currentSegmentId_ : preferredSegmentId);
+    recordingPreviewOffsetMs_ = 0;
+    dialog.setCurrentPositionProvider([this] {
+        const auto snapshot = player_.snapshot();
+        return snapshot.positionMilliseconds + recordingPreviewOffsetMs_;
+    });
+    dialog.setPreviewHandler([this, imported](std::uint64_t startMs, std::uint64_t endMs) {
+        previewRecordingRange(imported, startMs, endMs);
+    });
+    dialog.setPlaybackHandlers(
+        [this, imported] {
+            recordingPreviewOffsetMs_ = 0;
+            std::string error;
+            if (!player_.playAsync(imported.path, true, &error)) {
+                showStatus(QStringLiteral("原始录音播放失败：%1").arg(qString(error)), true);
+                return;
+            }
+            playbackTitleLabel_->setText(QStringLiteral("正在预览 · 原始录音"));
+            playbackDetailLabel_->setText(QStringLiteral("播放进度可用于设置起点与终点"));
+            pollPlayback();
+        },
+        [this] { togglePlaybackPause(); },
+        [this, imported](std::uint64_t positionMs) {
+            // Seeking from a clip preview always returns to the full source;
+            // the dialog's position provider then uses the source timeline.
+            recordingPreviewOffsetMs_ = 0;
+            std::string error;
+            if (!player_.playAsync(imported.path, true, &error) ||
+                !player_.seek(positionMs, &error)) {
+                showStatus(QStringLiteral("原始录音定位失败：%1").arg(qString(error)), true);
+                return;
+            }
+            playbackTitleLabel_->setText(QStringLiteral("正在预览 · 原始录音"));
+            playbackDetailLabel_->setText(QStringLiteral("播放进度可用于设置起点与终点"));
+            pollPlayback();
+        },
+        [this] {
+            return player_.snapshot().state == platform::windows::WavPlayer::State::Playing;
+        },
+        [this] {
+            return player_.snapshot().state == platform::windows::WavPlayer::State::Paused;
+        });
+    std::string playbackError;
+    if (!player_.playAsync(imported.path, true, &playbackError)) {
+        showStatus(QStringLiteral("无法预览原始录音：%1").arg(qString(playbackError)), true);
+    } else {
+        playbackTitleLabel_->setText(QStringLiteral("正在预览 · 原始录音"));
+        playbackDetailLabel_->setText(QStringLiteral("播放进度可用于设置起点与终点"));
+        pollPlayback();
+    }
+    const bool accepted = dialog.exec() == QDialog::Accepted;
+    if (recordingImportThread_ != nullptr && recordingImportCancel_) {
+        recordingImportCancel_->store(true, std::memory_order_relaxed);
+    }
+    if (accepted) {
+        player_.stop();
+        recordingPreviewOffsetMs_ = 0;
+        applyRecordingMark(imported, dialog.mark());
+    } else {
+        player_.stop();
+        recordingPreviewOffsetMs_ = 0;
+    }
+}
+
+void MainWindow::previewRecordingRange(const ImportedAudio& imported,
+                                       std::uint64_t startMs,
+                                       std::uint64_t endMs) {
+    if (startMs >= endMs || recordingImportThread_ != nullptr) {
+        return;
+    }
+    std::filesystem::path destination;
+    try {
+        destination = outputDirectory() / "sources" / ".preview" /
+                     (freshStableId("recording-preview") + ".wav");
+        std::filesystem::create_directories(destination.parent_path());
+    } catch (const std::exception& error) {
+        showFailure(QStringLiteral("无法准备录音预览目录"), error);
+        return;
+    }
+    const auto error = std::make_shared<std::string>();
+    const auto cancel = std::make_shared<std::atomic_bool>(false);
+    recordingImportCancel_ = cancel;
+    auto* progress = new QProgressDialog(QStringLiteral("正在生成选段预览…"),
+                                         QStringLiteral("取消"), 0, 0, this);
+    progress->setWindowTitle(QStringLiteral("录音预览"));
+    progress->setWindowModality(Qt::WindowModal);
+    progress->setAutoClose(false);
+    progress->setAutoReset(false);
+    recordingImportProgress_ = progress;
+    connect(progress, &QProgressDialog::canceled, this, [cancel] {
+        cancel->store(true, std::memory_order_relaxed);
+    });
+    auto* worker = QThread::create([source = imported.path, startMs, endMs, destination,
+                                    error, cancel] {
+        (void)extractRecording(source, startMs, endMs, destination, error.get(),
+                               [cancel] { return cancel->load(std::memory_order_relaxed); });
+    });
+    recordingImportThread_ = worker;
+    connect(worker, &QThread::finished, this,
+            [this, worker, destination, error, cancel, startMs] {
+                if (recordingImportProgress_ != nullptr) {
+                    const QSignalBlocker blocker(recordingImportProgress_);
+                    recordingImportProgress_->close();
+                    recordingImportProgress_->deleteLater();
+                    recordingImportProgress_ = nullptr;
+                }
+                recordingImportThread_ = nullptr;
+                const bool cancelled = cancel->load(std::memory_order_relaxed);
+                const bool success = !cancelled && error->empty() &&
+                                     std::filesystem::exists(destination);
+                worker->deleteLater();
+                if (success) {
+                    recordingPreviewOffsetMs_ = startMs;
+                    std::string playbackError;
+                    if (!player_.playAsync(destination, false, &playbackError)) {
+                        showStatus(QStringLiteral("选段预览播放失败：%1")
+                                       .arg(qString(playbackError)),
+                                   true);
+                    } else {
+                        playbackTitleLabel_->setText(QStringLiteral("正在预览 · 录音选段"));
+                        playbackDetailLabel_->setText(QStringLiteral("预览完成后可继续调整起止点"));
+                        pollPlayback();
+                    }
+                } else if (!cancelled) {
+                    showStatus(QStringLiteral("选段预览失败：%1")
+                                   .arg(qString(error->empty() ? "unknown error" : *error)),
+                               true);
+                }
+            });
+    progress->show();
+    worker->start();
+}
+
+void MainWindow::applyRecordingMark(const ImportedAudio& imported,
+                                    const RecordingMark& mark) {
+    Segment* segment = project_.findSegment(mark.segmentId);
+    if (segment == nullptr) {
+        showStatus(QStringLiteral("目标题组不存在，未保存录音标记"), true);
+        return;
+    }
+    if (mark.startMs >= mark.endMs || mark.endMs > imported.durationMs) {
+        showStatus(QStringLiteral("录音范围无效，未保存录音标记"), true);
+        return;
+    }
+    segment->recording = RecordingSource{utf8(qPath(imported.path)), mark.startMs, mark.endMs};
+    currentSegmentId_ = mark.segmentId;
+    if (segment->generation.has_value()) {
+        segment->generation->requiresTeacherReview = true;
+        segment->generation->teacherReviewed = false;
+    }
+    segment->renderedAudioFile.clear();
+    segmentWavs_.erase(segment->id);
+    programWav_.clear();
+    project_.renderedProgramFile.clear();
+    history_.adoptCurrent(project_, currentSegmentId_);
+    setDirty();
+    refreshSegmentList();
+    updateMetrics();
+    updateAudioAvailability();
+    showStatus(QStringLiteral("已将 %1 的录音片段绑定到 %2")
+                   .arg(qPath(imported.path), questionLabel(*segment)));
+}
+
+void MainWindow::installNeuralVoicePack() {
+    if (voicePackInstallProcess_ != nullptr || busy_) {
+        return;
+    }
+    const QString appDirectory = QCoreApplication::applicationDirPath();
+    const QString scriptPath = QDir(appDirectory).filePath(QStringLiteral("scripts/install-kokoro.ps1"));
+    const QString helperPath = QDir(appDirectory).filePath(QStringLiteral("audiloquy-kokoro-helper.exe"));
+    if (!QFileInfo(scriptPath).isFile()) {
+        showStatus(QStringLiteral("当前安装包没有声音包安装脚本"), true);
+        return;
+    }
+    auto* process = new QProcess(this);
+    process->setProcessChannelMode(QProcess::MergedChannels);
+    voicePackInstallProcess_ = process;
+    auto* progress = new QProgressDialog(QStringLiteral("正在安装本地神经音色…"),
+                                         QStringLiteral("取消"), 0, 0, this);
+    progress->setWindowTitle(QStringLiteral("安装神经音色"));
+    progress->setWindowModality(Qt::WindowModal);
+    progress->setAutoClose(false);
+    progress->setAutoReset(false);
+    voicePackInstallProgress_ = progress;
+    connect(progress, &QProgressDialog::canceled, this, [this] {
+        if (voicePackInstallProcess_ != nullptr) {
+            voicePackInstallProcess_->kill();
+        }
+    });
+    connect(process, &QProcess::readyReadStandardOutput, this, [this, process] {
+        const QString output = QString::fromUtf8(process->readAllStandardOutput()).trimmed();
+        if (!output.isEmpty()) {
+            const QStringList lines = output.split(QRegularExpression(QStringLiteral("[\\r\\n]+")),
+                                                   Qt::SkipEmptyParts);
+            if (!lines.isEmpty()) {
+                showStatus(lines.back());
+            }
+        }
+    });
+    connect(process,
+            qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
+            this,
+            [this, process](int exitCode, QProcess::ExitStatus status) {
+                const QString output = QString::fromUtf8(process->readAll()).trimmed();
+                if (voicePackInstallProgress_ != nullptr) {
+                    voicePackInstallProgress_->close();
+                    voicePackInstallProgress_->deleteLater();
+                    voicePackInstallProgress_ = nullptr;
+                }
+                voicePackInstallProcess_ = nullptr;
+                process->deleteLater();
+                if (status == QProcess::NormalExit && exitCode == 0) {
+                    refreshVoiceOptions();
+                    showStatus(QStringLiteral("神经音色安装完成，已重新扫描声音包"));
+                } else {
+                    const QString detail = output.isEmpty()
+                                               ? QStringLiteral("安装程序退出码 %1").arg(exitCode)
+                                               : output.right(500);
+                    showStatus(QStringLiteral("神经音色安装失败：%1").arg(detail), true);
+                }
+            });
+    progress->show();
+    process->start(QStringLiteral("powershell.exe"),
+                   {QStringLiteral("-NoProfile"), QStringLiteral("-ExecutionPolicy"),
+                    QStringLiteral("Bypass"), QStringLiteral("-File"), scriptPath,
+                    QStringLiteral("-HelperPath"), helperPath});
+    if (!process->waitForStarted(500)) {
+        progress->close();
+        progress->deleteLater();
+        voicePackInstallProgress_ = nullptr;
+        voicePackInstallProcess_ = nullptr;
+        process->deleteLater();
+        showStatus(QStringLiteral("无法启动声音包安装程序"), true);
+    }
 }
 
 void MainWindow::loadCurrentSegment() {
@@ -1949,26 +2726,56 @@ void MainWindow::loadCurrentSegment() {
         scriptEdit_->setPlainText(qString(segment->text));
         pauseSpin_->setValue(segment->pauseAfterSeconds);
         repeatSpin_->setValue(segment->repeatCount);
+        if (segment->recording.has_value()) {
+            const RecordingSource& recording = *segment->recording;
+            recordingSourceLabel_->setText(
+                QStringLiteral("录音片段 · %1–%2 ms · WPM 不改变录音")
+                    .arg(static_cast<qulonglong>(recording.startMs))
+                    .arg(static_cast<qulonglong>(recording.endMs)));
+            recordingSourceLabel_->setToolTip(qString(recording.audioFile));
+            editRecordingButton_->setVisible(true);
+            editRecordingButton_->setEnabled(enabled);
+            clearRecordingButton_->setVisible(true);
+            clearRecordingButton_->setEnabled(enabled);
+        } else {
+            recordingSourceLabel_->setText(QString());
+            recordingSourceLabel_->setToolTip(QString());
+            editRecordingButton_->setVisible(false);
+            editRecordingButton_->setEnabled(false);
+            clearRecordingButton_->setVisible(false);
+            clearRecordingButton_->setEnabled(false);
+        }
         currentGroupBadge_->setText(questionLabel(*segment));
         segmentIdLabel_->setText(qString(segment->id));
+        reviewGenerationButton_->setVisible(true);
         voiceHintLabel_->setText(project_.accent == Accent::American
                                      ? QStringLiteral("优先匹配 en-US 系统声音")
                                      : QStringLiteral("优先匹配 en-GB 系统声音"));
         if (segment->generation.has_value()) {
             const GenerationRecord& record = *segment->generation;
+            const bool hasEvidence = !record.evidence.empty() ||
+                                     std::any_of(record.additionalQuestions.begin(),
+                                                 record.additionalQuestions.end(),
+                                                 [](const GenerationQuestion& question) {
+                                                     return !question.evidence.empty();
+                                                 });
             generationAuditLabel_->setText(
-                QStringLiteral("%1%2 · 结构约束已校验 · %3")
+                QStringLiteral("%1%2 · %3 · %4")
                     .arg(qString(record.provider),
                          record.model.empty() ? QString()
                                               : QStringLiteral(" / %1").arg(qString(record.model)),
+                         hasEvidence ? QStringLiteral("证据已定位")
+                                     : QStringLiteral("证据需重新核对"),
                          record.teacherReviewed ? QStringLiteral("教师已确认")
                                                 : QStringLiteral("待教师语义复核")));
             teacherReviewedCheck_->setEnabled(true);
             teacherReviewedCheck_->setChecked(record.teacherReviewed);
+            reviewGenerationButton_->setEnabled(!busy_);
         } else {
             generationAuditLabel_->setText(QStringLiteral("手工文稿 · 无生成记录"));
             teacherReviewedCheck_->setChecked(false);
             teacherReviewedCheck_->setEnabled(false);
+            reviewGenerationButton_->setEnabled(false);
         }
     } else {
         currentGroupBadge_->setText(QStringLiteral("未选择"));
@@ -1977,10 +2784,19 @@ void MainWindow::loadCurrentSegment() {
         teacherReviewedCheck_->setChecked(false);
         teacherReviewedCheck_->setEnabled(false);
         scriptEdit_->clear();
+        recordingSourceLabel_->clear();
+        recordingSourceLabel_->setToolTip(QString());
+        editRecordingButton_->setVisible(false);
+        editRecordingButton_->setEnabled(false);
+        clearRecordingButton_->setVisible(false);
+        clearRecordingButton_->setEnabled(false);
+        reviewGenerationButton_->setVisible(true);
+        reviewGenerationButton_->setEnabled(false);
     }
     loadingUi_ = false;
     updateMetrics();
     updateAudioAvailability();
+    updateClassroomView();
 }
 
 void MainWindow::commitProjectSettings() {
@@ -2008,11 +2824,18 @@ void MainWindow::commitCurrentSegment() {
     if (Segment* segment = currentSegment()) {
         const std::string newText = utf8(scriptEdit_->toPlainText().trimmed());
         if (segment->text != newText) {
-            segment->generation.reset();
-            generationAuditLabel_->setText(QStringLiteral("文稿已手工修改 · 原生成审阅记录已失效"));
+            if (segment->generation.has_value()) {
+                // Keep the question/options/source metadata and re-anchor
+                // evidence that still exists in the edited manuscript.
+                revalidateGenerationEvidence(*segment->generation, newText);
+                generationAuditLabel_->setText(
+                    QStringLiteral("文稿已手工修改 · 题目来源保留 · 证据需重新核对"));
+            } else {
+                generationAuditLabel_->setText(QStringLiteral("手工文稿 · 无生成记录"));
+            }
             const QSignalBlocker reviewBlocker(teacherReviewedCheck_);
             teacherReviewedCheck_->setChecked(false);
-            teacherReviewedCheck_->setEnabled(false);
+            teacherReviewedCheck_->setEnabled(segment->generation.has_value());
         }
         segment->questions.first = questionStartSpin_->value();
         segment->questions.last = questionEndSpin_->value();
@@ -2053,10 +2876,26 @@ void MainWindow::updateMetrics() {
         segmentDurationLabel_->setText(QStringLiteral("—"));
         return;
     }
-    wordCountLabel_->setText(QStringLiteral("%1 词 · 单遍 %2")
-                                 .arg(static_cast<qulonglong>(countReadableWords(segment->text)))
-                                 .arg(durationText(estimateReadingDuration(segment->text,
-                                                                          project_.targetWpm))));
+    const auto wordCount = static_cast<qulonglong>(countReadableWords(segment->text));
+    if (segment->recording.has_value()) {
+        wordCountLabel_->setText(QStringLiteral("%1 词 · 录音片段 · WPM 不适用")
+                                     .arg(wordCount));
+    } else {
+        const auto measured = measuredWpmBySegment_.find(segment->id);
+        if (measured != measuredWpmBySegment_.end() && measured->second > 0.0) {
+            wordCountLabel_->setText(
+                QStringLiteral("%1 词 · 单遍 %2 · 实测 %3 WPM（排除编排停顿）")
+                    .arg(wordCount)
+                    .arg(durationText(estimateReadingDuration(segment->text, project_.targetWpm)))
+                    .arg(measured->second, 0, 'f', 1));
+        } else {
+            wordCountLabel_->setText(
+                QStringLiteral("%1 词 · 单遍 %2")
+                    .arg(wordCount)
+                    .arg(durationText(estimateReadingDuration(segment->text,
+                                                              project_.targetWpm))));
+        }
+    }
     try {
         segmentDurationLabel_->setText(
             durationText(estimateSegmentDuration(*segment, project_.targetWpm)));
@@ -2108,21 +2947,35 @@ void MainWindow::updateAudioAvailability() {
     previousButton_->setEnabled(segmentList_->currentRow() > 0 && !busy_);
     nextButton_->setEnabled(segmentList_->currentRow() >= 0 &&
                             segmentList_->currentRow() + 1 < segmentList_->count() && !busy_);
+    updateClassroomView();
 }
 
 void MainWindow::invalidateAllRenderedAudio() {
-    segmentWavs_.clear();
+    measuredWpmBySegment_.clear();
+    for (const Segment& segment : project_.segments) {
+        if (!segment.recording.has_value()) {
+            segmentWavs_.erase(segment.id);
+        }
+    }
     programWav_.clear();
     project_.renderedProgramFile.clear();
     for (Segment& segment : project_.segments) {
-        segment.renderedAudioFile.clear();
+        // A marked classroom recording is independent of the TTS accent and
+        // WPM settings. Keep its rendered clip reference so changing the
+        // narration controls does not pretend to alter the source recording.
+        if (!segment.recording.has_value()) {
+            segment.renderedAudioFile.clear();
+        }
     }
 }
 
 void MainWindow::invalidateCurrentRenderedAudio() {
     if (Segment* segment = currentSegment()) {
-        segmentWavs_.erase(segment->id);
-        segment->renderedAudioFile.clear();
+        measuredWpmBySegment_.erase(segment->id);
+        if (!segment->recording.has_value()) {
+            segmentWavs_.erase(segment->id);
+            segment->renderedAudioFile.clear();
+        }
     }
     programWav_.clear();
     project_.renderedProgramFile.clear();
@@ -2130,6 +2983,7 @@ void MainWindow::invalidateCurrentRenderedAudio() {
 
 void MainWindow::restoreRenderedAudio() {
     segmentWavs_.clear();
+    measuredWpmBySegment_.clear();
     programWav_.clear();
     for (const Segment& segment : project_.segments) {
         if (segment.renderedAudioFile.empty()) {
@@ -2177,6 +3031,18 @@ void MainWindow::refreshVoiceOptions() {
             true,
         });
     }
+    std::stable_sort(installedVoices_.begin(), installedVoices_.end(),
+                     [this](const platform::windows::VoiceInfo& left,
+                            const platform::windows::VoiceInfo& right) {
+                         const bool leftLocal = localVoicePacks_.ownsToken(left.tokenId);
+                         const bool rightLocal = localVoicePacks_.ownsToken(right.tokenId);
+                         if (leftLocal != rightLocal) {
+                             return leftLocal > rightLocal;
+                         }
+                         const QString leftName = qString(left.name);
+                         const QString rightName = qString(right.name);
+                         return QString::compare(leftName, rightName, Qt::CaseInsensitive) < 0;
+                     });
     if (installedVoices_.empty()) {
         const QString message = sapiError.empty()
                                     ? QStringLiteral("未发现可用的系统音色或本地声音包")
@@ -2304,6 +3170,138 @@ void MainWindow::setDisplayMode(DisplayMode mode) {
                             : QStringLiteral("已返回简洁编辑视图"));
 }
 
+void MainWindow::openGenerationReviewDialog() {
+    const Segment* segment = currentSegment();
+    if (segment == nullptr || !segment->generation.has_value()) {
+        showStatus(QStringLiteral("当前题组没有可查看的生成题目与证据"), true);
+        return;
+    }
+
+    const GenerationRecord& record = *segment->generation;
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("generationReviewDialog"));
+    dialog.setWindowTitle(QStringLiteral("题目与证据 · %1").arg(questionLabel(*segment)));
+    dialog.resize(760, 650);
+    dialog.setStyleSheet(QStringLiteral(R"CSS(
+        QDialog#generationReviewDialog {
+            background: #F7F5EF;
+            color: #273047;
+        }
+        QDialog#generationReviewDialog QLabel {
+            color: #273047;
+        }
+        QDialog#generationReviewDialog QLabel#reviewTitle {
+            color: #20283E;
+            font-size: 15pt;
+            font-weight: 700;
+        }
+        QDialog#generationReviewDialog QTextBrowser {
+            background: #FFFEFA;
+            border: 1px solid #E5DFD5;
+            border-radius: 10px;
+            padding: 10px;
+            color: #273047;
+        }
+        QDialog#generationReviewDialog QPushButton {
+            border: 1px solid #DED9D0;
+            border-radius: 8px;
+            background: #FFFEFA;
+            padding: 8px 16px;
+            color: #273047;
+            font-weight: 600;
+        }
+        QDialog#generationReviewDialog QPushButton:hover {
+            border-color: #B9BFE8;
+            background: #F7F6FB;
+        }
+    )CSS"));
+
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(22, 20, 22, 18);
+    layout->setSpacing(10);
+    auto* title = new QLabel(QStringLiteral("题目与证据（只读审阅）"), &dialog);
+    title->setObjectName(QStringLiteral("reviewTitle"));
+    layout->addWidget(title);
+    auto* hint = new QLabel(
+        QStringLiteral("这里显示保存于工程中的题干、选项和证据；修改文稿后仍需教师重新核对。"),
+        &dialog);
+    hint->setObjectName(QStringLiteral("mutedLabel"));
+    hint->setWordWrap(true);
+    layout->addWidget(hint);
+
+    auto* browser = new QTextBrowser(&dialog);
+    browser->setObjectName(QStringLiteral("generationReviewBrowser"));
+    browser->setReadOnly(true);
+    browser->setOpenExternalLinks(false);
+
+    const auto htmlText = [](std::string_view value) {
+        return qString(value).toHtmlEscaped().replace(QStringLiteral("\n"),
+                                                      QStringLiteral("<br>"));
+    };
+    const auto answerCode = [](const GenerationQuestion& question) {
+        return qString(question.correctAnswer);
+    };
+    QString html;
+    html += QStringLiteral("<p><b>生成来源：</b>%1%2</p>")
+                .arg(htmlText(record.provider),
+                     record.model.empty() ? QString()
+                                          : QStringLiteral(" · %1").arg(htmlText(record.model)));
+    html += QStringLiteral("<p><b>审阅状态：</b><span style='color:%1'>%2</span></p>")
+                .arg(record.teacherReviewed ? QStringLiteral("#117C6E") : QStringLiteral("#A15C36"),
+                     record.teacherReviewed ? QStringLiteral("教师已确认")
+                                            : QStringLiteral("待教师复核"));
+    html += QStringLiteral("<hr>");
+
+    std::vector<const GenerationQuestion*> questions;
+    questions.push_back(static_cast<const GenerationQuestion*>(&record));
+    for (const GenerationQuestion& question : record.additionalQuestions) {
+        questions.push_back(&question);
+    }
+    for (std::size_t index = 0; index < questions.size(); ++index) {
+        const GenerationQuestion& question = *questions[index];
+        html += QStringLiteral("<h3>第 %1 题%2</h3>")
+                    .arg(segment->questions.first + static_cast<int>(index))
+                    .arg(index > 0 ? QStringLiteral("（共享同一段材料）") : QString());
+        html += QStringLiteral("<p><b>题干：</b>%1</p>")
+                    .arg(htmlText(question.questionStem));
+        html += QStringLiteral("<p><b>选项：</b></p><ol type='A'>");
+        for (const std::string& option : question.options) {
+            html += QStringLiteral("<li>%1</li>").arg(htmlText(option));
+        }
+        html += QStringLiteral("</ol><p><b>正确答案：</b><span style='color:#117C6E'>%1</span></p>")
+                    .arg(answerCode(question).toHtmlEscaped());
+        html += QStringLiteral("<p><b>原文证据：</b></p>");
+        if (question.evidence.empty()) {
+            html += QStringLiteral("<p style='color:#A15C36'>暂无可定位证据，需教师重新核对。</p>");
+        } else {
+            for (const GenerationEvidence& evidence : question.evidence) {
+                if (evidence.quote.empty()) {
+                    html += QStringLiteral(
+                        "<p style='color:#A15C36'>[%1] 证据已失效，需教师重新核对。</p>")
+                                .arg(htmlText(evidence.option));
+                    continue;
+                }
+                html += QStringLiteral("<blockquote style='border-left:3px solid #B9BFE8; "
+                                       "padding-left:10px'>%1</blockquote>")
+                            .arg(htmlText(evidence.quote));
+                html += QStringLiteral("<p style='color:#6F7482'>选项 %1 · %2 · %3</p>")
+                            .arg(htmlText(evidence.option), htmlText(evidence.role),
+                                 htmlText(evidence.turnId));
+            }
+        }
+    }
+    html += QStringLiteral("<hr><h3>当前文稿</h3><p>%1</p>").arg(htmlText(segment->text));
+    browser->setHtml(html);
+    layout->addWidget(browser, 1);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("关闭"));
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    dialog.exec();
+}
+
 void MainWindow::openScenarioGenerator() {
     activateWorkflowStep(0);
     commitCurrentSegment();
@@ -2314,32 +3312,55 @@ void MainWindow::openScenarioGenerator() {
     }
 
     ScenarioDialog dialog(!segment->text.empty(), this);
-    if (dialog.exec() != QDialog::Accepted || !dialog.adoptedDraft()) {
+    if (dialog.exec() != QDialog::Accepted) {
         showStatus(QStringLiteral("未采用情景初稿，当前文稿保持不变"));
         return;
     }
-
-    const ScenarioDraft& draft = *dialog.adoptedDraft();
-    segment->speaker = "Man + Woman";
-    segment->text = renderDialogueScript(draft);
-    GenerationRecord generation;
-    generation.provider = dialog.adoptedProvider();
-    generation.model = dialog.adoptedModel();
-    generation.questionStem = draft.sourceRequest.questionStem;
-    generation.options = draft.sourceRequest.options;
-    generation.correctAnswer = std::string(answerLabelCode(draft.supportedAnswer));
-    generation.requiresTeacherReview = draft.requiresTeacherReview;
-    generation.teacherReviewed = false;
-    generation.evidence.reserve(draft.evidence.size());
-    for (const ScenarioEvidence& evidence : draft.evidence) {
-        generation.evidence.push_back(GenerationEvidence{
-            std::string(answerLabelCode(evidence.option)),
-            evidence.role == EvidenceRole::Supports ? "supports" : "rejects",
-            evidence.turnId,
-            evidence.quote,
-        });
+    const std::optional<GenerationRecord> adoptedGeneration = dialog.adoptedGeneration();
+    const std::string adoptedScript = dialog.adoptedScript();
+    if (!adoptedGeneration.has_value() || adoptedScript.empty()) {
+        // Keep compatibility with a dialog built against the original single
+        // question draft contract while the new multi-question result is
+        // adopted by default.
+        if (!dialog.adoptedDraft()) {
+            showStatus(QStringLiteral("未采用有效情景初稿，当前文稿保持不变"), true);
+            return;
+        }
     }
-    segment->generation = std::move(generation);
+    // Adopting a new AI manuscript switches this group back to text
+    // synthesis. The imported source remains on disk for later reuse.
+    segment->recording.reset();
+    segment->speaker = "Man + Woman";
+    if (adoptedGeneration.has_value() && !adoptedScript.empty()) {
+        segment->text = adoptedScript;
+        segment->generation = *adoptedGeneration;
+    } else {
+        const ScenarioDraft& draft = *dialog.adoptedDraft();
+        segment->text = renderDialogueScript(draft);
+        GenerationRecord generation;
+        generation.provider = dialog.adoptedProvider();
+        generation.model = dialog.adoptedModel();
+        generation.questionStem = draft.sourceRequest.questionStem;
+        generation.options = draft.sourceRequest.options;
+        generation.correctAnswer = std::string(answerLabelCode(draft.supportedAnswer));
+        generation.requiresTeacherReview = draft.requiresTeacherReview;
+        generation.teacherReviewed = false;
+        generation.evidence.reserve(draft.evidence.size());
+        for (const ScenarioEvidence& evidence : draft.evidence) {
+            generation.evidence.push_back(GenerationEvidence{
+                std::string(answerLabelCode(evidence.option)),
+                evidence.role == EvidenceRole::Supports ? "supports" : "rejects",
+                evidence.turnId,
+                evidence.quote,
+            });
+        }
+        segment->generation = std::move(generation);
+    }
+    if (segment->generation.has_value() && !segment->generation->additionalQuestions.empty()) {
+        const int generatedLast = segment->questions.first +
+                                   static_cast<int>(segment->generation->additionalQuestions.size());
+        segment->questions.last = std::max(segment->questions.last, generatedLast);
+    }
     invalidateCurrentRenderedAudio();
     player_.stop();
     setDirty();
@@ -2352,6 +3373,13 @@ void MainWindow::openScenarioGenerator() {
 }
 
 void MainWindow::activateWorkflowStep(int step) {
+    if (step == 4) {
+        setClassroomMode(true);
+        return;
+    }
+    if (classroomMode_) {
+        setClassroomMode(false);
+    }
     workflowStep_ = std::clamp(step, 0, 4);
     const std::array<QPushButton*, 5> buttons{
         manuscriptStepButton_, voiceStepButton_, rhythmStepButton_, generateStepButton_,
@@ -2657,6 +3685,7 @@ void MainWindow::startRender(RenderScope scope) {
     request.scope = scope;
     request.selectedSegmentId = currentSegmentId_;
     request.localVoicePacks = localVoicePacks_.snapshot();
+    request.projectFile = projectPath_;
     renderIntent_ = scope == RenderScope::Selected ? RenderIntent::Selected : RenderIntent::All;
     beginBusy(scope == RenderScope::Selected
                   ? QStringLiteral("正在后台生成选中题组…")
@@ -2693,6 +3722,7 @@ void MainWindow::startVoicePreview(platform::windows::VoiceGender gender) {
     request.scope = RenderScope::Selected;
     request.selectedSegmentId = id;
     request.localVoicePacks = localVoicePacks_.snapshot();
+    request.projectFile = projectPath_;
     renderIntent_ = male ? RenderIntent::PreviewMale : RenderIntent::PreviewFemale;
     beginBusy(male ? QStringLiteral("正在生成男声试听…") : QStringLiteral("正在生成女声试听…"));
     if (!renderJob_.start(std::move(request))) {
@@ -2750,6 +3780,12 @@ void MainWindow::handleRenderFinished(const RenderJobResult& result) {
             segmentWavs_[rendered.id] = rendered.path;
             if (Segment* segment = project_.findSegment(rendered.id)) {
                 segment->renderedAudioFile = utf8(qPath(rendered.path));
+                if (!segment->recording.has_value() && rendered.measuredWpm.has_value() &&
+                    rendered.measuredWpm.value() > 0.0) {
+                    measuredWpmBySegment_[rendered.id] = rendered.measuredWpm.value();
+                } else {
+                    measuredWpmBySegment_.erase(rendered.id);
+                }
                 appliedToProject = true;
             }
         }
@@ -2861,6 +3897,9 @@ void MainWindow::playSelected(bool loop) {
         showFailure(QStringLiteral("播放失败"), std::runtime_error(error));
         return;
     }
+    playingSegmentId_ = segment->id;
+    playingWholeProgram_ = false;
+    refreshClassroomList();
     playbackTitleLabel_->setText(
         QStringLiteral("%1%2").arg(loop ? QStringLiteral("循环播放 · ")
                                       : QStringLiteral("正在播放 · "),
@@ -2888,6 +3927,9 @@ void MainWindow::playAll() {
         showFailure(QStringLiteral("播放失败"), std::runtime_error(error));
         return;
     }
+    playingSegmentId_.clear();
+    playingWholeProgram_ = true;
+    refreshClassroomList();
     playbackTitleLabel_->setText(QStringLiteral("正在播放 · 整套听力"));
     playbackDetailLabel_->setText(
         QStringLiteral("%1 个题组 · 预估 %2")
@@ -2962,6 +4004,12 @@ void MainWindow::pollPlayback() {
     } else if (!active && playback.durationMilliseconds > 0) {
         playbackTitleLabel_->setText(QStringLiteral("播放完成"));
     }
+    if (!active && !playingSegmentId_.empty()) {
+        // Keep the finished group visible in the classroom queue while making
+        // it clear that playback has stopped. The next explicit play resets
+        // this marker.
+        updateClassroomView();
+    }
 }
 
 void MainWindow::stopPlayback() {
@@ -2971,6 +4019,9 @@ void MainWindow::stopPlayback() {
         return;
     }
     if (playbackTitleLabel_) {
+        playingSegmentId_.clear();
+        playingWholeProgram_ = false;
+        refreshClassroomList();
         playbackTitleLabel_->setText(QStringLiteral("已停止"));
         playbackSlider_->setRange(0, 0);
         playbackSlider_->setValue(0);
@@ -2981,9 +4032,15 @@ void MainWindow::stopPlayback() {
 }
 
 void MainWindow::moveSelection(int delta) {
-    const int next = segmentList_->currentRow() + delta;
-    if (next >= 0 && next < segmentList_->count()) {
-        segmentList_->setCurrentRow(next);
+    QListWidget* list = classroomMode_ && classroomSegmentList_ != nullptr
+                            ? classroomSegmentList_
+                            : segmentList_;
+    const int next = list->currentRow() + delta;
+    if (next >= 0 && next < list->count()) {
+        list->setCurrentRow(next);
+        if (classroomMode_ && segmentList_->currentRow() != next) {
+            segmentList_->setCurrentRow(next);
+        }
     }
 }
 

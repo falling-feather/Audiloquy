@@ -58,6 +58,7 @@ struct WorkflowState final {
     int attempts{};
     QString savePath;
     QString movedProjectPath;
+    QString generatedAudioPath;
     std::filesystem::path packageDirectory;
     std::filesystem::path movedDirectory;
     std::string failure;
@@ -231,6 +232,7 @@ struct WorkflowState final {
                 if (auto* stop = find<QPushButton>("stopPlaybackButton"); stop != nullptr) {
                     stop->click();
                 }
+                generatedAudioPath = output->text();
                 auto* save = button("saveButton", QStringLiteral("保存"));
                 if (save == nullptr) {
                     fail(56, "save button is missing after generation");
@@ -244,6 +246,17 @@ struct WorkflowState final {
                 const auto sourceProject = nativePath(savePath);
                 const storage::LoadResult loaded =
                     storage::load(sourceProject, ValidationPurpose::Draft);
+                std::error_code savedResourceError;
+                const bool audioSaved = !loaded.project.segments.empty() &&
+                    !loaded.project.segments.front().renderedAudioFile.empty() &&
+                    std::filesystem::equivalent(
+                        storage::resolveResource(sourceProject, loaded.project.segments.front().renderedAudioFile),
+                        nativePath(generatedAudioPath), savedResourceError);
+                if (!audioSaved) {
+                    if (++attempts > 150) fail(65, "the second save did not persist the generated audio reference");
+                    return;
+                }
+                attempts = 0;
                 if (!loaded.missingResources.empty()) {
                     fail(65, "saved generated project has missing audio resources");
                     return;

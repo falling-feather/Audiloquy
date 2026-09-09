@@ -417,28 +417,79 @@ public:
         }
         const std::size_t target = *draft.sourceRequest.targetWordCount;
         const std::size_t lowerTarget = target > 8 ? target - 8 : 0;
-        constexpr std::array<std::pair<std::string_view, std::string_view>, 10> fillers{{
-            {"I'll update the plan so everyone has the same information.",
-             "Good. That should prevent any confusion later."},
-            {"I will also check the details once more before we leave.",
-             "Thanks. It is better to be certain about the arrangement."},
-            {"We can send a short message to the others as well.",
-             "Yes, then nobody will follow the old plan by mistake."},
-            {"I have written the final detail in my calendar now.",
-             "Perfect. I will put the same detail in mine."},
-            {"That gives us enough time to prepare everything carefully.",
-             "Exactly. The final arrangement should work well for everyone."},
-            {"I will keep a copy of the updated plan on my phone.",
-             "That will be useful if we need to check it later."},
-            {"We should tell the group before anyone makes another arrangement.",
-             "I agree. I can send the message as soon as we finish."},
-            {"Nothing else in the plan needs to change at this point.",
-             "Good. Keeping the other details unchanged will make things simpler."},
-            {"I am glad we checked every possibility before making the decision.",
-             "So am I. Now the final plan is clear to both of us."},
-            {"Let me repeat that detail when I speak to the others.",
-             "Please do. A clear reminder will help everyone remember it."},
-        }};
+        const std::string topic = conciseTopic(draft.sourceRequest.topic);
+        std::vector<std::pair<std::string, std::string>> fillers;
+        fillers.reserve(10);
+        fillers.emplace_back(
+            "Before we finish, I'll write the important details about " + topic + " in one note.",
+            "That will keep the next step clear when we look at the plan again.");
+
+        switch (draft.questionKind) {
+        case QuestionKind::When:
+            fillers.emplace_back(
+                "I will leave a little room in my plan so an unexpected delay does not cause trouble.",
+                "That is sensible. A flexible arrangement is easier for everyone to follow.");
+            fillers.emplace_back(
+                "I can remind the others after I have checked the latest notice.",
+                "A clear reminder should keep an earlier arrangement from causing confusion.");
+            break;
+        case QuestionKind::Where:
+            fillers.emplace_back(
+                "I'll include a landmark in the directions so people can recognize the route.",
+                "Good. A clear landmark will make the meeting place easier to find.");
+            fillers.emplace_back(
+                "I will keep the map with the invitation and check it before I leave.",
+                "That should help the group follow the same route without another phone call.");
+            break;
+        case QuestionKind::Why:
+            fillers.emplace_back(
+                "I will keep the background detail with the note so the decision still makes sense later.",
+                "That will help us explain the choice without adding a new story.");
+            fillers.emplace_back(
+                "If someone asks about the decision, I can answer from the same written explanation.",
+                "Good. Keeping the explanation consistent will prevent another misunderstanding.");
+            break;
+        case QuestionKind::What:
+            fillers.emplace_back(
+                "I'll list the selected item beside the other notes so nothing is left uncertain.",
+                "Good. A complete list will help everyone follow the same plan.");
+            fillers.emplace_back(
+                "I will read the summary once before sharing it with the group.",
+                "A quick check can catch a missing detail before anybody relies on it.");
+            break;
+        case QuestionKind::Unsupported:
+            break;
+        }
+
+        if (containsConvenienceStore(draft.sourceRequest.topic) ||
+            containsConvenienceStore(draft.sourceRequest.questionStem)) {
+            fillers.emplace_back(
+                "I will keep the shopping list with the receipt so the errand is easy to check later.",
+                "That makes sense. We can see what still needs attention without guessing.");
+            fillers.emplace_back(
+                "If I remember another small item, I will add it to the same list instead of starting over.",
+                "Good. One list will keep the visit simple and prevent a forgotten detail.");
+        } else {
+            fillers.emplace_back(
+                "I will check the written notice once more before I share it with the others.",
+                "A careful check is better than several different versions of the same message.");
+            fillers.emplace_back(
+                "Let's keep the original note nearby in case somebody asks what we agreed.",
+                "That will make the follow-up conversation much easier.");
+        }
+
+        fillers.emplace_back(
+            "I can explain the arrangement briefly when the group asks about it.",
+            "A clear explanation will prevent people from guessing.");
+        fillers.emplace_back(
+            "If a detail changes, I will edit this note instead of starting a second one.",
+            "That should keep the final information in one place.");
+        fillers.emplace_back(
+            "We can review the note together after we finish this conversation.",
+            "Two people checking the same words can catch a small misunderstanding.");
+        fillers.emplace_back(
+            "After the conversation, I will read the note once to make sure it sounds clear.",
+            "If a sentence is confusing, we can fix it before anyone relies on it.");
 
         SpeakerGender nextSpeaker =
             draft.turns.empty() || draft.turns.back().speaker == SpeakerGender::Female
@@ -448,10 +499,10 @@ public:
             if (dialogueWordCount(draft) >= lowerTarget) {
                 break;
             }
-            addTurn(nextSpeaker, std::string(firstText));
+            addTurn(nextSpeaker, firstText);
             nextSpeaker = nextSpeaker == SpeakerGender::Male ? SpeakerGender::Female
                                                               : SpeakerGender::Male;
-            addTurn(nextSpeaker, std::string(secondText), 600);
+            addTurn(nextSpeaker, secondText, 600);
             nextSpeaker = nextSpeaker == SpeakerGender::Male ? SpeakerGender::Female
                                                               : SpeakerGender::Male;
         }
@@ -1241,6 +1292,74 @@ std::string renderDialogueScript(const ScenarioDraft& draft) {
         output.push_back('\n');
     }
     return output;
+}
+
+void revalidateGenerationEvidence(GenerationRecord& record, std::string_view editedText) {
+    const auto findCaseInsensitiveAscii = [](std::string_view haystack,
+                                             std::string_view needle) -> std::size_t {
+        if (needle.empty() || needle.size() > haystack.size()) {
+            return std::string::npos;
+        }
+        for (std::size_t start = 0; start + needle.size() <= haystack.size(); ++start) {
+            bool matches = true;
+            for (std::size_t offset = 0; offset < needle.size(); ++offset) {
+                const unsigned char left = static_cast<unsigned char>(haystack[start + offset]);
+                const unsigned char right = static_cast<unsigned char>(needle[offset]);
+                const auto lower = [](unsigned char value) {
+                    return value >= 'A' && value <= 'Z'
+                               ? static_cast<unsigned char>(value - 'A' + 'a')
+                               : value;
+                };
+                if (lower(left) != lower(right)) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) {
+                return start;
+            }
+        }
+        return std::string::npos;
+    };
+
+    const auto revalidateQuestion = [&](GenerationQuestion& question) {
+        for (GenerationEvidence& evidence : question.evidence) {
+            if (evidence.quote.empty()) {
+                evidence.turnId.clear();
+                continue;
+            }
+            const std::size_t offset = editedText.find(evidence.quote);
+            const std::size_t insensitiveOffset =
+                offset == std::string::npos
+                    ? findCaseInsensitiveAscii(editedText, evidence.quote)
+                    : offset;
+            if (insensitiveOffset == std::string::npos) {
+                evidence.quote.clear();
+                evidence.turnId.clear();
+            } else {
+                evidence.quote = std::string(
+                    editedText.substr(insensitiveOffset, evidence.quote.size()));
+                // MainWindow stores one MAN:/WOMAN: turn per line. When a
+                // teacher inserts or removes a line, update the provenance
+                // turn id to the line that now contains the quote.
+                if (editedText.find('\n') != std::string::npos) {
+                    const std::size_t lineNumber = static_cast<std::size_t>(
+                        std::count(editedText.begin(), editedText.begin() +
+                                                   static_cast<std::ptrdiff_t>(insensitiveOffset),
+                                   '\n')) +
+                        1;
+                    evidence.turnId = turnId(lineNumber);
+                }
+            }
+        }
+    };
+
+    revalidateQuestion(record);
+    for (GenerationQuestion& question : record.additionalQuestions) {
+        revalidateQuestion(question);
+    }
+    record.requiresTeacherReview = true;
+    record.teacherReviewed = false;
 }
 
 }  // namespace listening

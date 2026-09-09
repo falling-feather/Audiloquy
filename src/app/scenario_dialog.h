@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/multi_question.h"
+#include "core/project.h"
 #include "core/scenario_generator.h"
 
 #include <QDialog>
@@ -24,6 +26,8 @@ public:
     explicit ScenarioDialog(bool replacesExistingText, QWidget* parent = nullptr);
 
     [[nodiscard]] const std::optional<ScenarioDraft>& adoptedDraft() const noexcept;
+    [[nodiscard]] std::optional<GenerationRecord> adoptedGeneration() const;
+    [[nodiscard]] std::string adoptedScript() const;
     [[nodiscard]] std::string adoptedProvider() const;
     [[nodiscard]] std::string adoptedModel() const;
 
@@ -35,6 +39,11 @@ private:
     void buildUi();
     void connectUi();
     void populateExample();
+    void saveCurrentQuestion();
+    void loadQuestion(std::size_t index);
+    void refreshQuestionList();
+    void addQuestion();
+    void removeQuestion();
     void generateDraft();
     [[nodiscard]] ScenarioRequest currentRequest() const;
     void adoptDraft();
@@ -52,6 +61,9 @@ private:
     QComboBox* difficultyCombo_{};
     QSpinBox* targetWordsSpin_{};
     QPushButton* exampleButton_{};
+    QListWidget* questionList_{};
+    QPushButton* addQuestionButton_{};
+    QPushButton* removeQuestionButton_{};
     QPushButton* generateButton_{};
     QPushButton* localProviderButton_{};
     QPushButton* deepSeekProviderButton_{};
@@ -66,6 +78,11 @@ private:
     std::optional<ScenarioDraft> generatedDraft_;
     std::optional<ScenarioDraft> localDraft_;
     std::optional<ScenarioDraft> adoptedDraft_;
+    std::optional<MultiQuestionDraft> generatedMultiDraft_;
+    std::optional<GenerationRecord> adoptedGeneration_;
+    std::string adoptedScript_;
+    std::vector<ScenarioRequest> questionRequests_;
+    std::size_t activeQuestionIndex_{};
     bool replacesExistingText_{false};
     bool usedDeepSeek_{false};
     QString deepSeekModel_;

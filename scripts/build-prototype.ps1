@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 [CmdletBinding()]
 param(
     [ValidateSet('Debug', 'Release')]
@@ -58,6 +59,7 @@ if (-not $SkipPackage) {
     }
     New-Item -ItemType Directory -Force -Path $distribution | Out-Null
     Copy-Item -Force -LiteralPath $executable -Destination $distribution
+    Copy-Item -Force -LiteralPath (Join-Path $buildDirectory 'audiloquy-kokoro-helper.exe') -Destination $distribution
     & $deploy --release --compiler-runtime --no-translations `
         --no-system-d3d-compiler --no-system-dxc-compiler `
         (Join-Path $distribution 'Audiloquy.exe')
@@ -121,6 +123,10 @@ if (-not $SkipPackage) {
     New-Item -ItemType Directory -Force -Path $voicePackDirectory | Out-Null
     Copy-Item -Force -LiteralPath (Join-Path $projectRoot 'voice-packs\README.txt') `
         -Destination $voicePackDirectory
+    $runtimeScripts=Join-Path $distribution 'scripts'
+    New-Item -ItemType Directory -Path $runtimeScripts -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install-kokoro.ps1') -Destination $runtimeScripts -Force
+    & (Join-Path $PSScriptRoot 'collect-runtime-notices.ps1') -PackageDirectory $distribution -ToolchainBin $toolchainBin
 }
 
 Write-Host "Audiloquy / 语澜 ready: $executable"

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "app/audio_import.h"
 #include "app/local_voice_pack.h"
 #include "app/render_job.h"
 #include "core/editor_history.h"
@@ -11,7 +12,9 @@
 #include <QMainWindow>
 
 #include <filesystem>
+#include <atomic>
 #include <exception>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -30,6 +33,9 @@ class QScrollArea;
 class QSlider;
 class QSpinBox;
 class QStackedWidget;
+class QProgressDialog;
+class QProcess;
+class QThread;
 class QTextEdit;
 class QTimer;
 class QWidget;
@@ -37,6 +43,9 @@ class QEvent;
 class QObject;
 
 namespace listening::app {
+
+class RecordingMarkerDialog;
+struct RecordingMark;
 
 class MainWindow final : public QMainWindow {
 public:
@@ -94,6 +103,19 @@ private:
     void updateSelectedListItem();
     void updateMetrics();
     void updateAudioAvailability();
+    void refreshClassroomList();
+    void updateClassroomView();
+    void setClassroomMode(bool enabled);
+    void openRecordingImportDialog();
+    void beginRecordingImport(const std::filesystem::path& source);
+    void openRecordingMarker(const ImportedAudio& imported,
+                             const std::string& preferredSegmentId = {});
+    void previewRecordingRange(const ImportedAudio& imported,
+                               std::uint64_t startMs,
+                               std::uint64_t endMs);
+    void applyRecordingMark(const ImportedAudio& imported,
+                            const RecordingMark& mark);
+    void installNeuralVoicePack();
     void invalidateAllRenderedAudio();
     void invalidateCurrentRenderedAudio();
     void restoreRenderedAudio();
@@ -109,6 +131,7 @@ private:
     void activateWorkflowStep(int step);
     void updatePageContext();
     void openScenarioGenerator();
+    void openGenerationReviewDialog();
     void setDirty(bool dirty = true);
 
     [[nodiscard]] Segment* currentSegment() noexcept;
@@ -137,6 +160,7 @@ private:
     std::filesystem::path projectPath_;
     std::string currentSegmentId_;
     std::unordered_map<std::string, std::filesystem::path> segmentWavs_;
+    std::unordered_map<std::string, double> measuredWpmBySegment_;
     std::filesystem::path programWav_;
     LocalVoicePackManager localVoicePacks_;
     platform::windows::WavPlayer player_;
@@ -150,7 +174,10 @@ private:
     bool recoveryEnabled_{false};
     bool applyingHistory_{false};
     bool closePending_{false};
+    bool classroomMode_{false};
     RenderIntent renderIntent_{RenderIntent::None};
+    std::string playingSegmentId_;
+    bool playingWholeProgram_{false};
     std::optional<Project> dragBeforeProject_;
     std::string dragBeforeSelection_;
     std::vector<platform::windows::VoiceInfo> installedVoices_;
@@ -191,6 +218,21 @@ private:
     QLabel* currentGroupBadge_{};
     QScrollArea* workspaceScroll_{};
     QScrollArea* inspectorScroll_{};
+    QStackedWidget* centerStack_{};
+    QWidget* classroomPage_{};
+    QListWidget* classroomSegmentList_{};
+    QLabel* classroomProjectLabel_{};
+    QLabel* classroomQuestionLabel_{};
+    QLabel* classroomStateLabel_{};
+    QLabel* classroomDetailLabel_{};
+    QPushButton* classroomReturnButton_{};
+    QPushButton* classroomPlayButton_{};
+    QPushButton* classroomLoopButton_{};
+    QPushButton* classroomPlayAllButton_{};
+    QPushButton* classroomPreviousButton_{};
+    QPushButton* classroomNextButton_{};
+    QPushButton* importRecordingButton_{};
+    QPushButton* installVoicePackButton_{};
     QFrame* scenarioGeneratorCard_{};
     QPushButton* smartScenarioButton_{};
     QFrame* editorCard_{};
@@ -214,6 +256,10 @@ private:
     QComboBox* speakerCombo_{};
     QTextEdit* scriptEdit_{};
     QLabel* wordCountLabel_{};
+    QLabel* recordingSourceLabel_{};
+    QPushButton* editRecordingButton_{};
+    QPushButton* clearRecordingButton_{};
+    QPushButton* reviewGenerationButton_{};
     QDoubleSpinBox* pauseSpin_{};
     QSpinBox* repeatSpin_{};
     QLabel* segmentDurationLabel_{};
@@ -242,6 +288,12 @@ private:
     QLabel* statusLabel_{};
     QTimer* recoveryTimer_{};
     QTimer* historyTimer_{};
+    QThread* recordingImportThread_{};
+    QProgressDialog* recordingImportProgress_{};
+    std::shared_ptr<std::atomic_bool> recordingImportCancel_;
+    std::uint64_t recordingPreviewOffsetMs_{};
+    QProcess* voicePackInstallProcess_{};
+    QProgressDialog* voicePackInstallProgress_{};
 };
 
 }  // namespace listening::app

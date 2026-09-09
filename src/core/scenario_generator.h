@@ -10,6 +10,8 @@
 
 namespace listening {
 
+struct GenerationRecord;
+
 enum class AnswerLabel {
     A,
     B,
@@ -165,5 +167,10 @@ public:
 
 // Plain UTF-8 preview/TTS script, one "MAN:" or "WOMAN:" line per turn.
 [[nodiscard]] std::string renderDialogueScript(const ScenarioDraft& draft);
+
+// Keeps generation provenance after a teacher edits the rendered script. Exact
+// evidence quotes that still occur in the edited text remain usable; missing
+// quotes are cleared and the record is marked for another teacher review.
+void revalidateGenerationEvidence(GenerationRecord& record, std::string_view editedText);
 
 }  // namespace listening

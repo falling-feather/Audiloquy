@@ -17,6 +17,7 @@ add_library(listening_core STATIC
     src/core/output_paths.cpp
     src/core/project.cpp
     src/core/scenario_generator.cpp
+    src/core/multi_question.cpp
 )
 target_include_directories(listening_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
@@ -39,6 +40,18 @@ if(WIN32)
     target_link_libraries(listening_windows PUBLIC sapi ole32 uuid winmm)
 
     find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets Network)
+
+    add_executable(audiloquy_kokoro_helper src/tools/kokoro_helper.cpp)
+    set_target_properties(audiloquy_kokoro_helper PROPERTIES OUTPUT_NAME audiloquy-kokoro-helper AUTOMOC OFF AUTORCC OFF)
+    target_compile_definitions(audiloquy_kokoro_helper PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(audiloquy_kokoro_helper PRIVATE normaliz)
+    if(MINGW)
+        target_link_options(audiloquy_kokoro_helper PRIVATE -municode -static)
+    endif()
+
+    add_library(listening_import STATIC src/app/audio_import.cpp)
+    target_link_libraries(listening_import PUBLIC listening_windows Qt6::Core PRIVATE mfplat mfreadwrite mfuuid)
+    target_compile_definitions(listening_import PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 
     # GNU windres cannot invoke its preprocessor when the source tree contains
     # non-ASCII path components. Stage only the two icon inputs in an ASCII
@@ -72,8 +85,12 @@ if(WIN32)
         src/app/main.cpp
         tests/desktop_workflow_smoke.cpp
         tests/desktop_workflow_smoke.h
+        tests/recording_workflow_smoke.cpp
+        tests/recording_workflow_smoke.h
         src/app/main_window.cpp
         src/app/main_window.h
+        src/app/recording_marker_dialog.cpp
+        src/app/recording_marker_dialog.h
         src/app/render_job.cpp
         src/app/render_job.h
         src/app/local_voice_pack.cpp
@@ -95,6 +112,7 @@ if(WIN32)
         listening_audio
         listening_windows
         listening_storage
+        listening_import
         Qt6::Widgets
         Qt6::Network
     )
@@ -130,6 +148,10 @@ if(BUILD_TESTING)
     add_executable(scenario_generator_tests tests/scenario_generator_tests.cpp)
     target_link_libraries(scenario_generator_tests PRIVATE listening_core)
     add_test(NAME scenario_generator_tests COMMAND scenario_generator_tests)
+
+    add_executable(multi_question_tests tests/multi_question_tests.cpp)
+    target_link_libraries(multi_question_tests PRIVATE listening_core)
+    add_test(NAME multi_question_tests COMMAND multi_question_tests)
 
     add_executable(wav_builder_tests tests/wav_builder_tests.cpp)
     target_link_libraries(wav_builder_tests PRIVATE listening_audio)
@@ -173,13 +195,20 @@ if(BUILD_TESTING)
         )
         target_compile_definitions(render_job_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
         target_link_libraries(render_job_tests PRIVATE
-            listening_core listening_audio listening_windows Qt6::Core
+            listening_core listening_audio listening_windows listening_storage listening_import Qt6::Core
         )
         add_test(NAME render_job_tests COMMAND render_job_tests)
         set_target_properties(render_job_tests PROPERTIES
             AUTOGEN_BUILD_DIR "${audiloquy_icon_stage}/autogen-render-tests"
         )
         set_tests_properties(render_job_tests PROPERTIES TIMEOUT 60)
+
+        add_executable(audio_import_tests tests/audio_import_tests.cpp src/app/render_job.cpp src/app/render_job.h src/app/local_voice_pack.cpp)
+        target_link_libraries(audio_import_tests PRIVATE listening_import listening_storage Qt6::Core)
+        target_compile_definitions(audio_import_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+        set_target_properties(audio_import_tests PROPERTIES AUTOGEN_BUILD_DIR "${audiloquy_icon_stage}/autogen-import-tests")
+        add_test(NAME audio_import_tests COMMAND audio_import_tests)
+        set_tests_properties(audio_import_tests PROPERTIES TIMEOUT 60)
 
         add_executable(deepseek_live_smoke EXCLUDE_FROM_ALL
             tests/deepseek_live_smoke.cpp
@@ -237,6 +266,18 @@ if(BUILD_TESTING)
             WORKING_DIRECTORY "${workflow_smoke_directory}"
             TIMEOUT 50
         )
+        set(classroom_smoke_directory "${CMAKE_BINARY_DIR}/classroom-smoke")
+        file(MAKE_DIRECTORY "${classroom_smoke_directory}")
+        add_test(NAME prototype_classroom_smoke COMMAND EnglishListeningPrototype --classroom-smoke-test)
+        set_tests_properties(prototype_classroom_smoke PROPERTIES WORKING_DIRECTORY "${classroom_smoke_directory}" TIMEOUT 50)
+        set(recording_smoke_directory "${CMAKE_BINARY_DIR}/recording-smoke")
+        file(MAKE_DIRECTORY "${recording_smoke_directory}")
+        add_test(NAME prototype_recording_smoke COMMAND EnglishListeningPrototype --recording-smoke-test)
+        set_tests_properties(prototype_recording_smoke PROPERTIES WORKING_DIRECTORY "${recording_smoke_directory}" TIMEOUT 50)
+        set(multi_smoke_directory "${CMAKE_BINARY_DIR}/multi-smoke")
+        file(MAKE_DIRECTORY "${multi_smoke_directory}")
+        add_test(NAME prototype_multi_smoke COMMAND EnglishListeningPrototype --scenario-multi-smoke-test)
+        set_tests_properties(prototype_multi_smoke PROPERTIES WORKING_DIRECTORY "${multi_smoke_directory}" TIMEOUT 50)
     endif()
 endif()
 

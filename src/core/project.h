@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <cstddef>
 #include <stdexcept>
 #include <string>
@@ -46,13 +47,20 @@ struct GenerationEvidence {
 
 // Audit data survives save/reopen so a structurally valid AI/local draft is
 // never mistaken for a teacher-approved listening question.
-struct GenerationRecord {
-    std::string provider;
-    std::string model;
+struct GenerationQuestion {
     std::string questionStem;
     std::array<std::string, 3> options;
     std::string correctAnswer;
     std::vector<GenerationEvidence> evidence;
+    bool operator==(const GenerationQuestion&) const = default;
+};
+
+struct GenerationRecord : GenerationQuestion {
+    std::string provider;
+    std::string model;
+    // The inherited question is the first question (schema 2 wire layout).
+    // Additional questions share the same listening passage, without duplicating it.
+    std::vector<GenerationQuestion> additionalQuestions;
     bool requiresTeacherReview{true};
     bool teacherReviewed{false};
 
@@ -68,6 +76,13 @@ struct VoiceSettings {
     bool operator==(const VoiceSettings&) const = default;
 };
 
+struct RecordingSource {
+    std::string audioFile;
+    std::uint64_t startMs{};
+    std::uint64_t endMs{};
+    bool operator==(const RecordingSource&) const = default;
+};
+
 // repeatCount is the total number of times the text is played. A value of 1
 // means "play once". pauseAfterSeconds is applied after every play, including
 // the final one, which keeps the estimated program duration deterministic.
@@ -80,6 +95,7 @@ struct Segment {
     int repeatCount{1};
     std::string renderedAudioFile;
     std::optional<GenerationRecord> generation;
+    std::optional<RecordingSource> recording;
 
     Segment() = default;
     Segment(std::string segmentId,
@@ -103,7 +119,7 @@ struct Segment {
 };
 
 struct Project {
-    static constexpr int currentSchemaVersion = 2;
+    static constexpr int currentSchemaVersion = 3;
 
     int schemaVersion{currentSchemaVersion};
     std::string id;

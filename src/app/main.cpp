@@ -1,10 +1,13 @@
 #include "app/main_window.h"
 
 #include "../../tests/desktop_workflow_smoke.h"
+#include "../../tests/recording_workflow_smoke.h"
 
 #include <QApplication>
 #include <QCheckBox>
 #include <QDir>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFileInfo>
 #include <QFont>
 #include <QIcon>
@@ -14,15 +17,19 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QSlider>
+#include <QStackedWidget>
 #include <QStyleFactory>
 #include <QTextEdit>
+#include <QTextBrowser>
 #include <QTimer>
 
 #include <cstring>
+#include <iostream>
 
 int main(int argc, char* argv[]) {
     for (int index = 1; index < argc; ++index) {
-        if (std::strcmp(argv[index], "--workflow-smoke-test") == 0) {
+        if (std::strcmp(argv[index], "--workflow-smoke-test") == 0 ||
+            std::strcmp(argv[index], "--recording-smoke-test") == 0) {
             QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
             break;
         }
@@ -42,11 +49,73 @@ int main(int argc, char* argv[]) {
         if (!listening::app::startDesktopWorkflowSmoke(application, window)) {
             return 20;
         }
+    } else if (application.arguments().contains(QStringLiteral("--recording-smoke-test"))) {
+        if (!listening::app::startRecordingWorkflowSmoke(application, window)) {
+            return 21;
+        }
+    } else if (application.arguments().contains(QStringLiteral("--classroom-smoke-test"))) {
+        QTimer::singleShot(120, &application, [&application, &window] {
+            window.resize(1366, 768);
+            application.processEvents();
+            auto* classroomStep =
+                window.findChild<QPushButton*>(QStringLiteral("classroomStepButton"));
+            auto* center = window.findChild<QStackedWidget*>(QStringLiteral("centerStack"));
+            auto* classroomTitle =
+                window.findChild<QLabel*>(QStringLiteral("classroomQuestionLabel"));
+            auto* classroomList =
+                window.findChild<QListWidget*>(QStringLiteral("classroomSegmentList"));
+            auto* returnButton =
+                window.findChild<QPushButton*>(QStringLiteral("classroomReturnButton"));
+            auto* script = window.findChild<QTextEdit*>(QStringLiteral("scriptEdit"));
+            if (classroomStep == nullptr || center == nullptr || classroomTitle == nullptr ||
+                classroomList == nullptr || returnButton == nullptr || script == nullptr) {
+                std::cerr << "[classroom-smoke] missing controls: classroomStep="
+                          << (classroomStep != nullptr) << " center=" << (center != nullptr)
+                          << " title=" << (classroomTitle != nullptr)
+                          << " list=" << (classroomList != nullptr)
+                          << " return=" << (returnButton != nullptr)
+                          << " script=" << (script != nullptr) << '\n';
+                application.exit(31);
+                return;
+            }
+            const bool scriptVisibleBefore = script->isVisible();
+            classroomStep->click();
+            application.processEvents();
+            const bool classroomVisible = center->currentWidget() != nullptr &&
+                                          center->currentWidget()->objectName() ==
+                                              QStringLiteral("classroomPage");
+            const bool contentReady = classroomList->count() > 0 &&
+                                      classroomTitle->text().contains(QStringLiteral("第"));
+            const QStringList paths = {QStringLiteral("tmp"),
+                                       QStringLiteral("tmp/classroom-smoke-1366x768.png")};
+            QDir().mkpath(paths.front());
+            const bool captured = window.grab().save(paths.back(), "PNG");
+            const bool scriptHidden = !script->isVisible();
+            returnButton->click();
+            application.processEvents();
+            const bool preparationVisible = center->currentWidget() != nullptr &&
+                                             center->currentWidget()->objectName() !=
+                                                 QStringLiteral("classroomPage");
+            if (!scriptVisibleBefore || !classroomVisible || !contentReady || !captured ||
+                !scriptHidden || !preparationVisible) {
+                std::cerr << "[classroom-smoke] checks: scriptBefore=" << scriptVisibleBefore
+                          << " classroom=" << classroomVisible << " content=" << contentReady
+                          << " captured=" << captured << " scriptHidden=" << scriptHidden
+                          << " prep=" << preparationVisible << '\n';
+            }
+            application.exit(!scriptVisibleBefore || !classroomVisible || !contentReady ||
+                                     !captured || !scriptHidden || !preparationVisible
+                                 ? 32
+                                 : 0);
+        });
     } else if (application.arguments().contains(QStringLiteral("--scenario-smoke-test")) ||
+               application.arguments().contains(QStringLiteral("--scenario-multi-smoke-test")) ||
         application.arguments().contains(QStringLiteral("--deepseek-live-smoke-test"))) {
         QTimer::singleShot(80, &application, [&application, &window] {
             const bool deepSeek = application.arguments().contains(
                 QStringLiteral("--deepseek-live-smoke-test"));
+            const bool multi = application.arguments().contains(
+                QStringLiteral("--scenario-multi-smoke-test"));
             auto* smart =
                 window.findChild<QPushButton*>(QStringLiteral("smartScenarioButton"));
             if (smart == nullptr) {
@@ -59,11 +128,34 @@ int main(int argc, char* argv[]) {
             const bool adopted = script != nullptr &&
                                  script->toPlainText().contains(QStringLiteral("MAN:")) &&
                                  script->toPlainText().contains(QStringLiteral("WOMAN:"));
+            bool reviewPassed = true;
+            if (multi && adopted) {
+                auto* reviewButton =
+                    window.findChild<QPushButton*>(QStringLiteral("viewGenerationButton"));
+                if (reviewButton == nullptr || !reviewButton->isEnabled()) {
+                    reviewPassed = false;
+                } else {
+                    reviewPassed = false;
+                    QTimer reviewTimer;
+                    reviewTimer.setSingleShot(true);
+                    QObject::connect(&reviewTimer, &QTimer::timeout, &window, [&] {
+                        auto* reviewDialog = window.findChild<QDialog*>(QStringLiteral("generationReviewDialog"));
+                        auto* browser = reviewDialog ? reviewDialog->findChild<QTextBrowser*>(QStringLiteral("generationReviewBrowser")) : nullptr;
+                        reviewPassed = browser && browser->toPlainText().contains(QStringLiteral("第 2 题"));
+                        if (reviewDialog) reviewDialog->reject();
+                        else if (auto* active = qobject_cast<QDialog*>(QApplication::activeModalWidget())) active->reject();
+                    });
+                    reviewTimer.start(80);
+                    reviewButton->click();
+                    reviewTimer.stop();
+                }
+            }
             const bool captured = QFileInfo::exists(
                 QDir::current().filePath(
                     deepSeek ? QStringLiteral("tmp/deepseek-live-smoke.png")
-                             : QStringLiteral("tmp/scenario-generator-smoke.png")));
-            application.exit(adopted && captured ? 0 : 8);
+                             : multi ? QStringLiteral("tmp/scenario-multi-smoke.png")
+                                     : QStringLiteral("tmp/scenario-generator-smoke.png")));
+            application.exit(adopted && captured && reviewPassed ? 0 : 8);
         });
     } else if (application.arguments().contains(QStringLiteral("--preview-smoke-test"))) {
         QTimer::singleShot(50, &application, [&application, &window] {
@@ -113,7 +205,7 @@ int main(int argc, char* argv[]) {
                                      stop->click();
                                      poll->stop();
                                      application.exit(paused ? 0 : 4);
-                                 } else if (*attempts > 240) {
+                                 } else if (*attempts > 800) {
                                      poll->stop();
                                      application.exit(4);
                                  }

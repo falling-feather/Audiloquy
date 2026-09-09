@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -61,11 +62,13 @@ struct RenderJobRequest {
     // Snapshot taken on the UI thread before start(). It keeps discovery and
     // mutable voice-pack manager state out of the worker.
     LocalVoicePackManager::Snapshot localVoicePacks;
+    std::filesystem::path projectFile;
 };
 
 struct RenderedSegment {
     std::string id;
     std::filesystem::path path;
+    std::optional<double> measuredWpm{};
 };
 
 struct RenderedVoiceUse {

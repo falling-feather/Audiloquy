@@ -17,6 +17,7 @@
 #include <QListWidgetItem>
 #include <QMouseEvent>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QScrollArea>
 #include <QScreen>
 #include <QSizePolicy>
@@ -94,6 +95,94 @@ QString htmlEscaped(std::string_view value) {
     return qString(value).toHtmlEscaped();
 }
 
+QString targetLengthHint(const std::optional<std::size_t>& targetWords,
+                        std::size_t actualWords) {
+    if (!targetWords.has_value()) {
+        return {};
+    }
+    const std::size_t target = *targetWords;
+    const std::size_t lower = target * 75 / 100;
+    const std::size_t upper = target * 125 / 100;
+    if (actualWords >= lower && actualWords <= upper) {
+        return {};
+    }
+    return QStringLiteral("⚠ 目标约 %1 词，实际 %2 词，已超出目标±25%；建议调整目标或修改文稿，证据未删减。")
+        .arg(static_cast<qulonglong>(target))
+        .arg(static_cast<qulonglong>(actualWords));
+}
+
+GenerationQuestion generationQuestionFromDraft(const ScenarioDraft& draft) {
+    GenerationQuestion question;
+    question.questionStem = draft.sourceRequest.questionStem;
+    question.options = draft.sourceRequest.options;
+    question.correctAnswer = std::string(answerLabelCode(draft.supportedAnswer));
+    question.evidence.reserve(draft.evidence.size());
+    for (const ScenarioEvidence& evidence : draft.evidence) {
+        question.evidence.push_back(GenerationEvidence{
+            std::string(answerLabelCode(evidence.option)),
+            evidence.role == EvidenceRole::Supports ? "supports" : "rejects",
+            evidence.turnId,
+            evidence.quote,
+        });
+    }
+    return question;
+}
+
+GenerationRecord generationRecordFromDraft(const ScenarioDraft& draft,
+                                           std::string provider,
+                                           std::string model) {
+    GenerationRecord record;
+    record.provider = std::move(provider);
+    record.model = std::move(model);
+    static_cast<GenerationQuestion&>(record) = generationQuestionFromDraft(draft);
+    record.requiresTeacherReview = draft.requiresTeacherReview;
+    record.teacherReviewed = false;
+    return record;
+}
+
+GenerationRecord generationRecordFromMulti(const MultiQuestionDraft& draft,
+                                           std::string provider,
+                                           std::string model) {
+    GenerationRecord record;
+    record.provider = std::move(provider);
+    record.model = std::move(model);
+    if (!draft.questions.empty()) {
+        const MultiQuestionItem& first = draft.questions.front();
+        record.questionStem = first.sourceRequest.questionStem;
+        record.options = first.sourceRequest.options;
+        record.correctAnswer = std::string(answerLabelCode(first.supportedAnswer));
+        record.evidence.reserve(first.evidence.size());
+        for (const ScenarioEvidence& evidence : first.evidence) {
+            record.evidence.push_back(GenerationEvidence{
+                std::string(answerLabelCode(evidence.option)),
+                evidence.role == EvidenceRole::Supports ? "supports" : "rejects",
+                evidence.turnId,
+                evidence.quote,
+            });
+        }
+        for (std::size_t index = 1; index < draft.questions.size(); ++index) {
+            const MultiQuestionItem& item = draft.questions[index];
+            GenerationQuestion question;
+            question.questionStem = item.sourceRequest.questionStem;
+            question.options = item.sourceRequest.options;
+            question.correctAnswer = std::string(answerLabelCode(item.supportedAnswer));
+            question.evidence.reserve(item.evidence.size());
+            for (const ScenarioEvidence& evidence : item.evidence) {
+                question.evidence.push_back(GenerationEvidence{
+                    std::string(answerLabelCode(evidence.option)),
+                    evidence.role == EvidenceRole::Supports ? "supports" : "rejects",
+                    evidence.turnId,
+                    evidence.quote,
+                });
+            }
+            record.additionalQuestions.push_back(std::move(question));
+        }
+    }
+    record.requiresTeacherReview = draft.requiresTeacherReview;
+    record.teacherReviewed = false;
+    return record;
+}
+
 QLabel* sectionLabel(const QString& text, QWidget* parent) {
     auto* label = new QLabel(text, parent);
     label->setObjectName(QStringLiteral("scenarioSectionTitle"));
@@ -122,14 +211,29 @@ ScenarioDialog::ScenarioDialog(bool replacesExistingText, QWidget* parent)
     setMinimumSize(920, 600);
     buildUi();
     connectUi();
+    questionRequests_.push_back(currentRequest());
+    refreshQuestionList();
     clearResult();
     const bool scenarioSmoke =
         QCoreApplication::arguments().contains(QStringLiteral("--scenario-smoke-test"));
+    const bool multiScenarioSmoke =
+        QCoreApplication::arguments().contains(QStringLiteral("--scenario-multi-smoke-test"));
     const bool deepSeekSmoke =
         QCoreApplication::arguments().contains(QStringLiteral("--deepseek-live-smoke-test"));
-    if (scenarioSmoke || deepSeekSmoke) {
+    if (scenarioSmoke || multiScenarioSmoke || deepSeekSmoke) {
         QTimer::singleShot(100, this, [this] {
             populateExample();
+            const bool requireMulti = QCoreApplication::arguments().contains(
+                QStringLiteral("--scenario-multi-smoke-test"));
+            if (requireMulti) {
+                addQuestion();
+                questionStemEdit_->setText(QStringLiteral("Where did the woman leave her bag?"));
+                optionAEdit_->setText(QStringLiteral("At the station."));
+                optionBEdit_->setText(QStringLiteral("In the classroom."));
+                optionCEdit_->setText(QStringLiteral("At the cafe."));
+                answerCombo_->setCurrentIndex(2);
+                saveCurrentQuestion();
+            }
             const bool requireDeepSeek = QCoreApplication::arguments().contains(
                 QStringLiteral("--deepseek-live-smoke-test"));
             if (requireDeepSeek && deepSeekProviderButton_->isEnabled()) {
@@ -141,10 +245,14 @@ ScenarioDialog::ScenarioDialog(bool replacesExistingText, QWidget* parent)
             const bool captured = grab().save(
                 directory.filePath(requireDeepSeek
                                        ? QStringLiteral("tmp/deepseek-live-smoke.png")
+                                       : requireMulti
+                                       ? QStringLiteral("tmp/scenario-multi-smoke.png")
                                        : QStringLiteral("tmp/scenario-generator-smoke.png")),
                 "PNG");
             if (generatedDraft_ && captured && adoptButton_->isEnabled() &&
                 (!requireDeepSeek || usedDeepSeek_)) {
+                adoptDraft();
+            } else if (generatedMultiDraft_ && captured && adoptButton_->isEnabled()) {
                 adoptDraft();
             } else {
                 reject();
@@ -155,6 +263,14 @@ ScenarioDialog::ScenarioDialog(bool replacesExistingText, QWidget* parent)
 
 const std::optional<ScenarioDraft>& ScenarioDialog::adoptedDraft() const noexcept {
     return adoptedDraft_;
+}
+
+std::optional<GenerationRecord> ScenarioDialog::adoptedGeneration() const {
+    return adoptedGeneration_;
+}
+
+std::string ScenarioDialog::adoptedScript() const {
+    return adoptedScript_;
 }
 
 std::string ScenarioDialog::adoptedProvider() const {
@@ -252,6 +368,28 @@ void ScenarioDialog::buildUi() {
     requestLayout->setContentsMargins(18, 16, 18, 18);
     requestLayout->setSpacing(11);
     requestLayout->addWidget(sectionLabel(QStringLiteral("01 题目信息"), requestPanel));
+
+    auto* questionToolbar = new QHBoxLayout;
+    questionToolbar->setSpacing(6);
+    auto* questionListLabel = new QLabel(QStringLiteral("共享材料中的题目"), requestPanel);
+    questionListLabel->setObjectName(QStringLiteral("scenarioFieldLabel"));
+    questionToolbar->addWidget(questionListLabel);
+    questionToolbar->addStretch();
+    addQuestionButton_ = new QPushButton(QStringLiteral("＋ 新增"), requestPanel);
+    addQuestionButton_->setObjectName(QStringLiteral("scenarioAddQuestionButton"));
+    removeQuestionButton_ = new QPushButton(QStringLiteral("删除"), requestPanel);
+    removeQuestionButton_->setObjectName(QStringLiteral("scenarioRemoveQuestionButton"));
+    removeQuestionButton_->setEnabled(false);
+    questionToolbar->addWidget(addQuestionButton_);
+    questionToolbar->addWidget(removeQuestionButton_);
+    requestLayout->addLayout(questionToolbar);
+    questionList_ = new QListWidget(requestPanel);
+    questionList_->setObjectName(QStringLiteral("scenarioQuestionList"));
+    questionList_->setSelectionMode(QAbstractItemView::SingleSelection);
+    questionList_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    questionList_->setMaximumHeight(86);
+    questionList_->setMinimumHeight(48);
+    requestLayout->addWidget(questionList_);
 
     auto* stemLabel = new QLabel(QStringLiteral("英文题干"), requestPanel);
     stemLabel->setObjectName(QStringLiteral("scenarioFieldLabel"));
@@ -503,6 +641,29 @@ void ScenarioDialog::buildUi() {
             border-bottom: 1px solid #E8EBF2;
             background: #FFFFFF;
         }
+        QListWidget#scenarioQuestionList {
+            color: #1D2340;
+            background: #FBFCFF;
+            border: 1px solid #D8DDEA;
+            border-radius: 8px;
+            outline: none;
+            selection-background-color: #4E59C6;
+            selection-color: #FFFFFF;
+        }
+        QListWidget#scenarioQuestionList::item {
+            color: #1D2340;
+            background: #FFFFFF;
+            border-bottom: 1px solid #E8EBF2;
+            padding: 5px 8px;
+        }
+        QListWidget#scenarioQuestionList::item:hover {
+            background: #EEF0FF;
+            color: #1D2340;
+        }
+        QListWidget#scenarioQuestionList::item:selected {
+            background: #4E59C6;
+            color: #FFFFFF;
+        }
         QLabel#scenarioMaleChip, QLabel#scenarioFemaleChip {
             min-width: 30px; max-width: 30px;
             min-height: 25px; max-height: 25px;
@@ -513,7 +674,6 @@ void ScenarioDialog::buildUi() {
         QLabel#scenarioFemaleChip { color: #C94A55; background: #FDEBED; }
         QLabel#scenarioTurnText { color: #14213D; font-size: 13px; }
         QLabel#scenarioTurnMeta { color: #8A91A8; font-size: 10px; }
-        }
         QPushButton {
             min-height: 34px;
             border-radius: 8px;
@@ -569,6 +729,16 @@ void ScenarioDialog::buildUi() {
 
 void ScenarioDialog::connectUi() {
     connect(exampleButton_, &QPushButton::clicked, this, [this] { populateExample(); });
+    connect(addQuestionButton_, &QPushButton::clicked, this, [this] { addQuestion(); });
+    connect(removeQuestionButton_, &QPushButton::clicked, this, [this] { removeQuestion(); });
+    connect(questionList_, &QListWidget::currentRowChanged, this, [this](int row) {
+        if (row < 0 || static_cast<std::size_t>(row) >= questionRequests_.size() ||
+            static_cast<std::size_t>(row) == activeQuestionIndex_) {
+            return;
+        }
+        saveCurrentQuestion();
+        loadQuestion(static_cast<std::size_t>(row));
+    });
     connect(generateButton_, &QPushButton::clicked, this, [this] { generateDraft(); });
     connect(adoptButton_, &QPushButton::clicked, this, [this] { adoptDraft(); });
     connect(cancelButton_, &QPushButton::clicked, this, &QDialog::reject);
@@ -590,7 +760,10 @@ void ScenarioDialog::connectUi() {
         showStatus(QStringLiteral("将先生成并保留本地初稿；仅在点击生成后发送非证据句进行润色。"));
     });
 
-    const auto invalidate = [this] { clearResult(); };
+    const auto invalidate = [this] {
+        saveCurrentQuestion();
+        clearResult();
+    };
     connect(questionStemEdit_, &QLineEdit::textChanged, this, invalidate);
     connect(optionAEdit_, &QLineEdit::textChanged, this, invalidate);
     connect(optionBEdit_, &QLineEdit::textChanged, this, invalidate);
@@ -612,7 +785,111 @@ void ScenarioDialog::populateExample() {
     topicEdit_->setCursorPosition(0);
     difficultyCombo_->setCurrentIndex(1);
     targetWordsSpin_->setValue(55);
+    saveCurrentQuestion();
+    refreshQuestionList();
     showStatus(QStringLiteral("示例已填入；点击“生成情景初稿”即可查看结果。"));
+}
+
+void ScenarioDialog::saveCurrentQuestion() {
+    if (questionRequests_.empty() || activeQuestionIndex_ >= questionRequests_.size() ||
+        questionStemEdit_ == nullptr) {
+        return;
+    }
+    questionRequests_[activeQuestionIndex_] = currentRequest();
+    refreshQuestionList();
+}
+
+void ScenarioDialog::loadQuestion(std::size_t index) {
+    if (index >= questionRequests_.size()) {
+        return;
+    }
+    activeQuestionIndex_ = index;
+    const ScenarioRequest& request = questionRequests_[index];
+    const QSignalBlocker stemBlocker(questionStemEdit_);
+    const QSignalBlocker optionABlocker(optionAEdit_);
+    const QSignalBlocker optionBBlocker(optionBEdit_);
+    const QSignalBlocker optionCBlocker(optionCEdit_);
+    const QSignalBlocker answerBlocker(answerCombo_);
+    const QSignalBlocker topicBlocker(topicEdit_);
+    const QSignalBlocker difficultyBlocker(difficultyCombo_);
+    const QSignalBlocker targetBlocker(targetWordsSpin_);
+    questionStemEdit_->setText(qString(request.questionStem));
+    optionAEdit_->setText(qString(request.options[0]));
+    optionBEdit_->setText(qString(request.options[1]));
+    optionCEdit_->setText(qString(request.options[2]));
+    answerCombo_->setCurrentIndex(request.correctAnswer.has_value()
+                                       ? static_cast<int>(*request.correctAnswer) + 1
+                                       : 0);
+    topicEdit_->setText(qString(request.topic));
+    if (request.difficulty.has_value()) {
+        const int difficultyIndex = difficultyCombo_->findData(qString(*request.difficulty));
+        difficultyCombo_->setCurrentIndex(difficultyIndex >= 0 ? difficultyIndex : 1);
+    } else {
+        difficultyCombo_->setCurrentIndex(1);
+    }
+    if (request.targetWordCount.has_value()) {
+        targetWordsSpin_->setValue(static_cast<int>(*request.targetWordCount));
+    } else {
+        targetWordsSpin_->setValue(55);
+    }
+}
+
+void ScenarioDialog::refreshQuestionList() {
+    if (questionList_ == nullptr) {
+        return;
+    }
+    const QSignalBlocker blocker(questionList_);
+    questionList_->clear();
+    for (std::size_t index = 0; index < questionRequests_.size(); ++index) {
+        const ScenarioRequest& request = questionRequests_[index];
+        QString stem = qString(request.questionStem);
+        if (stem.isEmpty()) {
+            stem = QStringLiteral("待填写题目");
+        }
+        if (stem.size() > 42) {
+            stem = stem.left(42) + QStringLiteral("…");
+        }
+        questionList_->addItem(QStringLiteral("第 %1 题　%2")
+                                   .arg(static_cast<qulonglong>(index + 1), 1, 10, QLatin1Char('0'))
+                                   .arg(stem));
+    }
+    if (!questionRequests_.empty()) {
+        questionList_->setCurrentRow(static_cast<int>(std::min(
+            activeQuestionIndex_, questionRequests_.size() - 1)));
+    }
+    removeQuestionButton_->setEnabled(questionRequests_.size() > 1);
+    deepSeekProviderButton_->setEnabled(questionRequests_.size() == 1);
+    if (questionRequests_.size() > 1) localProviderButton_->setChecked(true);
+}
+
+void ScenarioDialog::addQuestion() {
+    saveCurrentQuestion();
+    ScenarioRequest next;
+    if (!questionRequests_.empty()) {
+        next.topic = questionRequests_.front().topic;
+        next.difficulty = questionRequests_.front().difficulty;
+        next.targetWordCount = questionRequests_.front().targetWordCount;
+    }
+    questionRequests_.push_back(std::move(next));
+    activeQuestionIndex_ = questionRequests_.size() - 1;
+    refreshQuestionList();
+    loadQuestion(activeQuestionIndex_);
+    clearResult();
+    questionStemEdit_->setFocus(Qt::OtherFocusReason);
+    showStatus(QStringLiteral("已新增题目；填写完成后可与前面题目共用同一段听力。"));
+}
+
+void ScenarioDialog::removeQuestion() {
+    if (questionRequests_.size() <= 1) {
+        return;
+    }
+    saveCurrentQuestion();
+    questionRequests_.erase(questionRequests_.begin() + static_cast<std::ptrdiff_t>(activeQuestionIndex_));
+    activeQuestionIndex_ = std::min(activeQuestionIndex_, questionRequests_.size() - 1);
+    refreshQuestionList();
+    loadQuestion(activeQuestionIndex_);
+    clearResult();
+    showStatus(QStringLiteral("已删除当前题目。"));
 }
 
 ScenarioRequest ScenarioDialog::currentRequest() const {
@@ -632,11 +909,27 @@ ScenarioRequest ScenarioDialog::currentRequest() const {
 }
 
 void ScenarioDialog::generateDraft() {
+    saveCurrentQuestion();
+    const bool multiQuestion = questionRequests_.size() >= 2;
     const ScenarioRequest request = currentRequest();
     generateButton_->setEnabled(false);
     try {
-        localDraft_ = generateLocalScenario(request);
-        generatedDraft_ = localDraft_;
+        adoptedGeneration_.reset();
+        adoptedScript_.clear();
+        generatedMultiDraft_.reset();
+        if (multiQuestion) {
+            MultiQuestionRequest multiRequest;
+            multiRequest.questions = questionRequests_;
+            multiRequest.topic = request.topic;
+            multiRequest.difficulty = request.difficulty;
+            multiRequest.targetWordCount = request.targetWordCount;
+            generatedMultiDraft_ = generateLocalMultiQuestion(multiRequest);
+            localDraft_.reset();
+            generatedDraft_.reset();
+        } else {
+            localDraft_ = generateLocalScenario(request);
+            generatedDraft_ = localDraft_;
+        }
         adoptedDraft_.reset();
         usedDeepSeek_ = false;
         deepSeekModel_.clear();
@@ -646,7 +939,7 @@ void ScenarioDialog::generateDraft() {
         QString resultStatus =
             QStringLiteral("本地初稿已生成并完成结构校验。采用前请核对答案证据。");
         bool resultIsWarning = false;
-        if (deepSeekProviderButton_->isChecked()) {
+        if (deepSeekProviderButton_->isChecked() && !multiQuestion) {
             showStatus(QStringLiteral("本地初稿已保留；正在请求 DeepSeek 自然化对话并重建事实锚点……"));
             QApplication::processEvents();
             try {
@@ -665,6 +958,11 @@ void ScenarioDialog::generateDraft() {
                                    .arg(QString::fromUtf8(error.what()));
                 resultIsWarning = true;
             }
+        } else if (deepSeekProviderButton_->isChecked() && multiQuestion) {
+            resultStatus = QStringLiteral(
+                "多题共用材料已由本地模板生成；当前先不调用 API，确保所有题目共享同一组事实。请教师逐题复核。"
+            );
+            resultIsWarning = true;
         }
         refreshPreview();
         adoptButton_->setEnabled(true);
@@ -672,7 +970,10 @@ void ScenarioDialog::generateDraft() {
     } catch (const ScenarioValidationError& error) {
         localDraft_.reset();
         generatedDraft_.reset();
+        generatedMultiDraft_.reset();
         adoptedDraft_.reset();
+        adoptedGeneration_.reset();
+        adoptedScript_.clear();
         previewList_->clear();
         evidenceBrowser_->clear();
         adoptButton_->setEnabled(false);
@@ -692,11 +993,23 @@ void ScenarioDialog::generateDraft() {
 }
 
 void ScenarioDialog::adoptDraft() {
-    if (!generatedDraft_) {
+    if (!generatedDraft_ && !generatedMultiDraft_) {
         showStatus(QStringLiteral("请先生成一份可采用的情景初稿。"), true);
         return;
     }
-    adoptedDraft_ = generatedDraft_;
+    adoptedGeneration_.reset();
+    adoptedScript_.clear();
+    if (generatedMultiDraft_) {
+        adoptedScript_ = renderMultiDialogueScript(*generatedMultiDraft_);
+        adoptedGeneration_ = generationRecordFromMulti(
+            *generatedMultiDraft_, adoptedProvider(), adoptedModel());
+        adoptedDraft_.reset();
+    } else {
+        adoptedDraft_ = generatedDraft_;
+        adoptedScript_ = renderDialogueScript(*generatedDraft_);
+        adoptedGeneration_ = generationRecordFromDraft(
+            *generatedDraft_, adoptedProvider(), adoptedModel());
+    }
     accept();
 }
 
@@ -704,6 +1017,9 @@ void ScenarioDialog::clearResult() {
     localDraft_.reset();
     generatedDraft_.reset();
     adoptedDraft_.reset();
+    generatedMultiDraft_.reset();
+    adoptedGeneration_.reset();
+    adoptedScript_.clear();
     usedDeepSeek_ = false;
     deepSeekModel_.clear();
     previewList_->clear();
@@ -717,13 +1033,17 @@ void ScenarioDialog::clearResult() {
 }
 
 void ScenarioDialog::refreshPreview() {
-    if (!generatedDraft_) {
+    const std::vector<DialogueTurn>* turns = nullptr;
+    if (generatedMultiDraft_) {
+        turns = &generatedMultiDraft_->turns;
+    } else if (generatedDraft_) {
+        turns = &generatedDraft_->turns;
+    } else {
         return;
     }
-    const ScenarioDraft& draft = *generatedDraft_;
     previewList_->clear();
-    for (std::size_t index = 0; index < draft.turns.size(); ++index) {
-        const DialogueTurn& turn = draft.turns[index];
+    for (std::size_t index = 0; index < turns->size(); ++index) {
+        const DialogueTurn& turn = (*turns)[index];
         auto* item = new QListWidgetItem(previewList_);
         auto* row = new QWidget(previewList_);
         auto* rowLayout = new QHBoxLayout(row);
@@ -750,22 +1070,93 @@ void ScenarioDialog::refreshPreview() {
         item->setSizeHint(QSize(0, turn.text.size() > 90 ? 70 : 54));
         previewList_->setItemWidget(item, row);
     }
+    if (generatedMultiDraft_) {
+        const QString lengthHint = targetLengthHint(
+            generatedMultiDraft_->sourceRequest.targetWordCount,
+            generatedMultiDraft_->wordCount);
+        QString sourceLabel =
+            QStringLiteral("✓ 本地共享场景模板（离线）\n"
+                           "✓ %1 道题共用同一段对话与事实\n"
+                           "✓ 每题均已建立支持/排除证据\n"
+                           "⚑ 语义唯一性：待教师逐题确认\n"
+                           "实际词数：%2\n"
+                           "未向任何网络服务发送内容")
+                .arg(static_cast<qulonglong>(generatedMultiDraft_->questions.size()))
+                .arg(static_cast<qulonglong>(generatedMultiDraft_->wordCount));
+        if (!lengthHint.isEmpty()) {
+            sourceLabel += QStringLiteral("\n") + lengthHint;
+        }
+        generationSourceLabel_->setText(sourceLabel);
+        QString html;
+        html += QStringLiteral("<div style='padding:8px 10px;margin:0 0 10px 0;"
+                               "background:#EAF7F2;color:#087D78;border:1px solid #C7E8DD;"
+                               "border-radius:8px;font-weight:700'>✓ 多题共用同一段材料 · ⚑ 待逐题复核</div>");
+        html += QStringLiteral("<p style='margin:0 0 8px 0;color:#59617d'>场景：%1　词数：%2</p>")
+                    .arg(htmlEscaped(generatedMultiDraft_->setting))
+                    .arg(static_cast<qulonglong>(generatedMultiDraft_->wordCount));
+        if (!lengthHint.isEmpty()) {
+            html += QStringLiteral("<div style='padding:7px 9px;margin:0 0 8px 0;"
+                                   "background:#FFF4DE;color:#9A6A24;border:1px solid #F0D39A;"
+                                   "border-radius:7px'>%1</div>")
+                        .arg(lengthHint.toHtmlEscaped());
+        }
+        for (std::size_t questionIndex = 0;
+             questionIndex < generatedMultiDraft_->questions.size(); ++questionIndex) {
+            const MultiQuestionItem& question = generatedMultiDraft_->questions[questionIndex];
+            html += QStringLiteral("<p style='margin:10px 0 4px 0'><b>第%1题：</b>%2</p>")
+                        .arg(static_cast<qulonglong>(questionIndex + 1))
+                        .arg(htmlEscaped(question.sourceRequest.questionStem));
+            html += QStringLiteral("<table cellspacing='0' cellpadding='4' width='100%'>");
+            for (const auto& judgment : question.optionJudgments) {
+                const bool supported = judgment.verdict == OptionVerdict::Supported;
+                html += QStringLiteral("<tr><td width='28'><b>%1</b></td><td width='54' style='color:%2'>%3</td><td>%4</td></tr>")
+                            .arg(qString(answerLabelCode(judgment.option)),
+                                 supported ? QStringLiteral("#087D78") : QStringLiteral("#8A6070"),
+                                 verdictName(judgment.verdict),
+                                 judgment.explanation);
+            }
+            html += QStringLiteral("</table><ul style='margin-top:4px'>");
+            for (const auto& evidence : question.evidence) {
+                html += QStringLiteral("<li><b>%1 · %2</b>：&ldquo;%3&rdquo;</li>")
+                            .arg(qString(answerLabelCode(evidence.option)),
+                                 evidenceRoleName(evidence.role), htmlEscaped(evidence.quote));
+            }
+            html += QStringLiteral("</ul>");
+        }
+        evidenceBrowser_->setHtml(html);
+        return;
+    }
+    const ScenarioDraft& draft = *generatedDraft_;
+    const QString lengthHint = targetLengthHint(
+        draft.sourceRequest.targetWordCount, draft.wordCount);
     if (usedDeepSeek_) {
-        generationSourceLabel_->setText(
+        QString sourceLabel =
             QStringLiteral("① 本地确定性初稿：已通过\n"
                            "② DeepSeek 可选润色：%1\n"
                            "③ 本地结构与事实锚点复检：已通过\n"
                            "⚑ 语义唯一性：待教师确认\n"
-                           "令牌：输入 %2 / 输出 %3")
+                           "实际词数：%2\n"
+                           "令牌：输入 %3 / 输出 %4")
                 .arg(deepSeekModel_)
+                .arg(static_cast<qulonglong>(draft.wordCount))
                 .arg(deepSeekPromptTokens_)
-                .arg(deepSeekCompletionTokens_));
+                .arg(deepSeekCompletionTokens_);
+        if (!lengthHint.isEmpty()) {
+            sourceLabel += QStringLiteral("\n") + lengthHint;
+        }
+        generationSourceLabel_->setText(sourceLabel);
     } else {
-        generationSourceLabel_->setText(
+        QString sourceLabel =
             QStringLiteral("✓ 本地确定性模板（离线）\n"
                            "✓ 结构与事实锚点校验完成\n"
                            "⚑ 语义唯一性待教师确认\n"
-                           "未向任何网络服务发送内容"));
+                           "实际词数：%1\n"
+                           "未向任何网络服务发送内容")
+                .arg(static_cast<qulonglong>(draft.wordCount));
+        if (!lengthHint.isEmpty()) {
+            sourceLabel += QStringLiteral("\n") + lengthHint;
+        }
+        generationSourceLabel_->setText(sourceLabel);
     }
 
     QString html;
@@ -777,6 +1168,12 @@ void ScenarioDialog::refreshPreview() {
                 .arg(questionKindName(draft.questionKind), htmlEscaped(draft.setting))
                 .arg(static_cast<qulonglong>(draft.wordCount));
     html += QStringLiteral("</p>");
+    if (!lengthHint.isEmpty()) {
+        html += QStringLiteral("<div style='padding:7px 9px;margin:0 0 8px 0;"
+                               "background:#FFF4DE;color:#9A6A24;border:1px solid #F0D39A;"
+                               "border-radius:7px'>%1</div>")
+                    .arg(lengthHint.toHtmlEscaped());
+    }
     html += QStringLiteral("<p style='margin:0 0 10px 0'>预设答案（结构匹配）：<b style='color:#087D78'>%1</b></p>")
                 .arg(qString(answerLabelCode(draft.supportedAnswer)));
     html += QStringLiteral("<table cellspacing='0' cellpadding='4' width='100%'>");

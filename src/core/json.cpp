@@ -592,6 +592,24 @@ std::string toJson(const Project& project, bool pretty, ValidationPurpose purpos
         output += std::to_string(segment.repeatCount);
         appendFieldPrefix(output, "renderedAudioFile", pretty, 6, false);
         output += escapeString(segment.renderedAudioFile);
+        appendFieldPrefix(output, "recording", pretty, 6, false);
+        if (!segment.recording.has_value()) {
+            output += "null";
+        } else {
+            const RecordingSource& recording = *segment.recording;
+            output.push_back('{');
+            appendFieldPrefix(output, "audioFile", pretty, 8, true);
+            output += escapeString(recording.audioFile);
+            appendFieldPrefix(output, "startMs", pretty, 8, false);
+            output += std::to_string(recording.startMs);
+            appendFieldPrefix(output, "endMs", pretty, 8, false);
+            output += std::to_string(recording.endMs);
+            if (pretty) {
+                output.push_back('\n');
+                output.append(6, ' ');
+            }
+            output.push_back('}');
+        }
         appendFieldPrefix(output, "generation", pretty, 6, false);
         if (!segment.generation.has_value()) {
             output += "null";
@@ -658,6 +676,81 @@ std::string toJson(const Project& project, bool pretty, ValidationPurpose purpos
                 output.append(8, ' ');
             }
             output.push_back(']');
+            appendFieldPrefix(output, "additionalQuestions", pretty, 8, false);
+            output.push_back('[');
+            for (std::size_t questionIndex = 0;
+                 questionIndex < record.additionalQuestions.size(); ++questionIndex) {
+                const GenerationQuestion& question = record.additionalQuestions[questionIndex];
+                if (questionIndex != 0) {
+                    output.push_back(',');
+                }
+                if (pretty) {
+                    output.push_back('\n');
+                    output.append(10, ' ');
+                }
+                output.push_back('{');
+                appendFieldPrefix(output, "questionStem", pretty, 12, true);
+                output += escapeString(question.questionStem);
+                appendFieldPrefix(output, "options", pretty, 12, false);
+                output.push_back('[');
+                for (std::size_t option = 0; option < question.options.size(); ++option) {
+                    if (option != 0) {
+                        output.push_back(',');
+                    }
+                    if (pretty) {
+                        output.push_back(' ');
+                    }
+                    output += escapeString(question.options[option]);
+                }
+                if (pretty && !question.options.empty()) {
+                    output.push_back(' ');
+                }
+                output.push_back(']');
+                appendFieldPrefix(output, "correctAnswer", pretty, 12, false);
+                output += escapeString(question.correctAnswer);
+                appendFieldPrefix(output, "evidence", pretty, 12, false);
+                output.push_back('[');
+                for (std::size_t evidenceIndex = 0;
+                     evidenceIndex < question.evidence.size(); ++evidenceIndex) {
+                    const GenerationEvidence& item = question.evidence[evidenceIndex];
+                    if (evidenceIndex != 0) {
+                        output.push_back(',');
+                    }
+                    if (pretty) {
+                        output.push_back('\n');
+                        output.append(14, ' ');
+                    }
+                    output.push_back('{');
+                    appendFieldPrefix(output, "option", pretty, 16, true);
+                    output += escapeString(item.option);
+                    appendFieldPrefix(output, "role", pretty, 16, false);
+                    output += escapeString(item.role);
+                    appendFieldPrefix(output, "turnId", pretty, 16, false);
+                    output += escapeString(item.turnId);
+                    appendFieldPrefix(output, "quote", pretty, 16, false);
+                    output += escapeString(item.quote);
+                    if (pretty) {
+                        output.push_back('\n');
+                        output.append(14, ' ');
+                    }
+                    output.push_back('}');
+                }
+                if (pretty && !question.evidence.empty()) {
+                    output.push_back('\n');
+                    output.append(12, ' ');
+                }
+                output.push_back(']');
+                if (pretty) {
+                    output.push_back('\n');
+                    output.append(10, ' ');
+                }
+                output.push_back('}');
+            }
+            if (pretty && !record.additionalQuestions.empty()) {
+                output.push_back('\n');
+                output.append(8, ' ');
+            }
+            output.push_back(']');
             if (pretty) {
                 output.push_back('\n');
                 output.append(6, ' ');
@@ -700,8 +793,8 @@ Project fromJson(std::string_view json, ValidationPurpose purpose) {
 
     Project project;
     const int sourceSchemaVersion = requireInteger(root, "schemaVersion", "$");
-    if (sourceSchemaVersion != 1 && sourceSchemaVersion != Project::currentSchemaVersion) {
-        throw ProjectFormatError("$.schemaVersion must be 1 or 2");
+    if (sourceSchemaVersion < 1 || sourceSchemaVersion > Project::currentSchemaVersion) {
+        throw ProjectFormatError("$.schemaVersion must be 1, 2 or 3");
     }
     project.schemaVersion = Project::currentSchemaVersion;
     project.id = requireMember(root, "id", JsonValue::Kind::String, "$").string;
@@ -751,6 +844,32 @@ Project fromJson(std::string_view json, ValidationPurpose purpose) {
         if (sourceSchemaVersion >= 2) {
             segment.renderedAudioFile =
                 requireMember(value, "renderedAudioFile", JsonValue::Kind::String, path).string;
+            const JsonValue* recording = optionalMember(value, "recording");
+            if (recording != nullptr && recording->kind != JsonValue::Kind::Null) {
+                if (recording->kind != JsonValue::Kind::Object) {
+                    throw ProjectFormatError(path + ".recording must be an object or null");
+                }
+                RecordingSource source;
+                const std::string recordingPath = path + ".recording";
+                source.audioFile = requireMember(*recording, "audioFile", JsonValue::Kind::String,
+                                                 recordingPath).string;
+                const double startNumber = requireMember(
+                    *recording, "startMs", JsonValue::Kind::Number, recordingPath).number;
+                const double endNumber = requireMember(
+                    *recording, "endMs", JsonValue::Kind::Number, recordingPath).number;
+                // The largest uint64 value rounds to 2^64 in a double. Reject
+                // that boundary and above before the narrowing conversion.
+                constexpr double maximumUnsignedExclusive = 18446744073709551616.0;
+                if (!std::isfinite(startNumber) || !std::isfinite(endNumber) ||
+                    std::trunc(startNumber) != startNumber || std::trunc(endNumber) != endNumber ||
+                    startNumber < 0.0 || endNumber < 0.0 ||
+                    startNumber >= maximumUnsignedExclusive || endNumber >= maximumUnsignedExclusive) {
+                    throw ProjectFormatError(recordingPath + ".startMs/endMs must be non-negative integers");
+                }
+                source.startMs = static_cast<std::uint64_t>(startNumber);
+                source.endMs = static_cast<std::uint64_t>(endNumber);
+                segment.recording = std::move(source);
+            }
             const JsonValue* generation = optionalMember(value, "generation");
             if (generation == nullptr) {
                 throw ProjectFormatError(path + ".generation is required");
@@ -809,6 +928,69 @@ Project fromJson(std::string_view json, ValidationPurpose purpose) {
                         requireMember(evidenceValue, "quote", JsonValue::Kind::String,
                                       evidencePath).string,
                     });
+                }
+                const JsonValue* additionalQuestions =
+                    optionalMember(*generation, "additionalQuestions");
+                if (additionalQuestions != nullptr) {
+                    if (additionalQuestions->kind != JsonValue::Kind::Array) {
+                        throw ProjectFormatError(generationPath +
+                                                 ".additionalQuestions must be an array");
+                    }
+                    record.additionalQuestions.reserve(additionalQuestions->array.size());
+                    for (std::size_t questionIndex = 0;
+                         questionIndex < additionalQuestions->array.size(); ++questionIndex) {
+                        const JsonValue& questionValue = additionalQuestions->array[questionIndex];
+                        const std::string questionPath = generationPath +
+                            ".additionalQuestions[" + std::to_string(questionIndex) + "]";
+                        if (questionValue.kind != JsonValue::Kind::Object) {
+                            throw ProjectFormatError(questionPath + " must be an object");
+                        }
+                        GenerationQuestion question;
+                        question.questionStem = requireMember(
+                            questionValue, "questionStem", JsonValue::Kind::String,
+                            questionPath).string;
+                        const auto& questionOptions = requireMember(
+                            questionValue, "options", JsonValue::Kind::Array,
+                            questionPath).array;
+                        if (questionOptions.size() != question.options.size()) {
+                            throw ProjectFormatError(questionPath +
+                                                     ".options must contain three strings");
+                        }
+                        for (std::size_t option = 0; option < questionOptions.size(); ++option) {
+                            if (questionOptions[option].kind != JsonValue::Kind::String) {
+                                throw ProjectFormatError(questionPath +
+                                                         ".options must contain strings");
+                            }
+                            question.options[option] = questionOptions[option].string;
+                        }
+                        question.correctAnswer = requireMember(
+                            questionValue, "correctAnswer", JsonValue::Kind::String,
+                            questionPath).string;
+                        const auto& questionEvidence = requireMember(
+                            questionValue, "evidence", JsonValue::Kind::Array,
+                            questionPath).array;
+                        question.evidence.reserve(questionEvidence.size());
+                        for (std::size_t evidenceIndex = 0;
+                             evidenceIndex < questionEvidence.size(); ++evidenceIndex) {
+                            const JsonValue& evidenceValue = questionEvidence[evidenceIndex];
+                            const std::string evidencePath = questionPath + ".evidence[" +
+                                std::to_string(evidenceIndex) + "]";
+                            if (evidenceValue.kind != JsonValue::Kind::Object) {
+                                throw ProjectFormatError(evidencePath + " must be an object");
+                            }
+                            question.evidence.push_back(GenerationEvidence{
+                                requireMember(evidenceValue, "option", JsonValue::Kind::String,
+                                              evidencePath).string,
+                                requireMember(evidenceValue, "role", JsonValue::Kind::String,
+                                              evidencePath).string,
+                                requireMember(evidenceValue, "turnId", JsonValue::Kind::String,
+                                              evidencePath).string,
+                                requireMember(evidenceValue, "quote", JsonValue::Kind::String,
+                                              evidencePath).string,
+                            });
+                        }
+                        record.additionalQuestions.push_back(std::move(question));
+                    }
                 }
                 segment.generation = std::move(record);
             }

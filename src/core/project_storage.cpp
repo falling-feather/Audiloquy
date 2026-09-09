@@ -7,6 +7,7 @@
 #include <cctype>
 #include <chrono>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <system_error>
 #include <utility>
@@ -149,6 +150,14 @@ LoadResult load(const std::filesystem::path& projectPath, ValidationPurpose purp
     LoadResult result;
     result.project = listening::loadProject(projectPath, purpose);
     for (const Segment& segment : result.project.segments) {
+        if (segment.recording) {
+            try {
+                validateAudioReference(projectPath, segment.recording->audioFile, "source recording");
+            } catch (const ProjectFormatError&) {
+                result.missingResources.push_back({"source recording", segment.recording->audioFile,
+                    resolveResource(projectPath, segment.recording->audioFile)});
+            }
+        }
         if (!segment.renderedAudioFile.empty()) {
             const auto resolved = resolveResource(projectPath, segment.renderedAudioFile);
             if (!std::filesystem::is_regular_file(resolved)) {
@@ -230,6 +239,7 @@ Project prepareForSave(const Project& project,
     };
     for (Segment& segment : prepared.segments) {
         segment.renderedAudioFile = rebase(segment.renderedAudioFile);
+        if (segment.recording) segment.recording->audioFile = rebase(segment.recording->audioFile);
     }
     prepared.renderedProgramFile = rebase(prepared.renderedProgramFile);
     return prepared;
@@ -246,6 +256,7 @@ PackageResult package(const Project& project,
     for (const Segment& segment : project.segments) {
         validateAudioReference(sourceProjectPath, segment.renderedAudioFile,
                                "segment audio");
+        if (segment.recording) validateAudioReference(sourceProjectPath, segment.recording->audioFile, "source recording");
     }
     validateAudioReference(sourceProjectPath, project.renderedProgramFile,
                            "complete program");
@@ -264,8 +275,20 @@ PackageResult package(const Project& project,
 
         Project packaged = project;
         std::size_t copied = 0;
+        std::map<std::filesystem::path, std::string> sourceReferences;
         for (std::size_t index = 0; index < packaged.segments.size(); ++index) {
             Segment& segment = packaged.segments[index];
+            if (segment.recording) {
+                const auto source = std::filesystem::weakly_canonical(resolveResource(sourceProjectPath, segment.recording->audioFile));
+                auto found = sourceReferences.find(source);
+                if (found == sourceReferences.end()) {
+                    const std::string filename = "source-" + std::to_string(sourceReferences.size()+1) + ".wav";
+                    std::filesystem::copy_file(source, audioDirectory / filename);
+                    found = sourceReferences.emplace(source, "audio/"+filename).first;
+                    ++copied;
+                }
+                segment.recording->audioFile = found->second;
+            }
             if (segment.renderedAudioFile.empty()) {
                 continue;
             }

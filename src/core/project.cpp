@@ -21,6 +21,7 @@ constexpr std::size_t maximumTitleBytes = 1024;
 constexpr std::size_t maximumSpeakerBytes = 512;
 constexpr std::size_t maximumTextBytes = 4 * 1024 * 1024;
 constexpr std::size_t maximumSegments = 10000;
+constexpr std::uint64_t maximumRecordingDurationMs = 2ULL * 60ULL * 60ULL * 1000ULL;
 
 [[nodiscard]] bool isAsciiAlphaNumeric(unsigned char value) noexcept {
     return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
@@ -220,7 +221,7 @@ std::vector<ValidationIssue> validate(const Project& project, ValidationPurpose 
             issues,
             ValidationCode::UnsupportedSchemaVersion,
             "schemaVersion",
-            "only schema version 2 is supported after migration");
+            "only schema version 3 is supported after migration");
     }
 
     if (!isStableId(project.id)) {
@@ -268,6 +269,46 @@ std::vector<ValidationIssue> validate(const Project& project, ValidationPurpose 
     validateOptionalUtf8(project.voiceSettings.femaleVoiceTokenId,
                          "voiceSettings.femaleVoiceTokenId", 16 * 1024);
     validateOptionalUtf8(project.renderedProgramFile, "renderedProgramFile", 32 * 1024);
+
+    const auto validateGenerationQuestion = [&](const GenerationQuestion& question,
+                                                const std::string& questionPath) {
+        if (question.questionStem.empty() || isBlank(question.questionStem)) {
+            addIssue(issues, ValidationCode::MissingValue,
+                     questionPath + ".questionStem", "must not be blank");
+        } else {
+            validateOptionalUtf8(question.questionStem,
+                                 questionPath + ".questionStem", 32 * 1024);
+        }
+        for (std::size_t option = 0; option < question.options.size(); ++option) {
+            if (question.options[option].empty() || isBlank(question.options[option])) {
+                addIssue(issues, ValidationCode::MissingValue,
+                         questionPath + ".options[" + std::to_string(option) + "]",
+                         "must not be blank");
+            } else {
+                validateOptionalUtf8(question.options[option],
+                                     questionPath + ".options[" + std::to_string(option) + "]",
+                                     16 * 1024);
+            }
+        }
+        if (question.correctAnswer != "A" && question.correctAnswer != "B" &&
+            question.correctAnswer != "C") {
+            addIssue(issues, ValidationCode::InvalidMetadata,
+                     questionPath + ".correctAnswer", "must be A, B or C");
+        }
+        if (question.evidence.size() > 32) {
+            addIssue(issues, ValidationCode::LimitExceeded,
+                     questionPath + ".evidence", "contains more than 32 entries");
+        }
+        for (std::size_t evidence = 0; evidence < question.evidence.size(); ++evidence) {
+            const auto evidencePath = questionPath + ".evidence[" +
+                                       std::to_string(evidence) + "]";
+            const GenerationEvidence& item = question.evidence[evidence];
+            validateOptionalUtf8(item.option, evidencePath + ".option", 16);
+            validateOptionalUtf8(item.role, evidencePath + ".role", 32);
+            validateOptionalUtf8(item.turnId, evidencePath + ".turnId", 256);
+            validateOptionalUtf8(item.quote, evidencePath + ".quote", 32 * 1024);
+        }
+    };
 
     if (project.segments.size() > maximumSegments) {
         addIssue(
@@ -327,7 +368,7 @@ std::vector<ValidationIssue> validate(const Project& project, ValidationPurpose 
         }
 
         if ((segment.text.empty() || isBlank(segment.text)) &&
-            purpose == ValidationPurpose::Strict) {
+            purpose == ValidationPurpose::Strict && !segment.recording.has_value()) {
             addIssue(
                 issues,
                 ValidationCode::MissingValue,
@@ -365,6 +406,22 @@ std::vector<ValidationIssue> validate(const Project& project, ValidationPurpose 
         }
 
         validateOptionalUtf8(segment.renderedAudioFile, path + ".renderedAudioFile", 32 * 1024);
+        if (segment.recording.has_value()) {
+            const RecordingSource& recording = *segment.recording;
+            if (recording.audioFile.empty() || isBlank(recording.audioFile)) {
+                addIssue(issues, ValidationCode::MissingValue,
+                         path + ".recording.audioFile", "must not be blank");
+            } else {
+                validateOptionalUtf8(recording.audioFile, path + ".recording.audioFile", 32 * 1024);
+            }
+            if (recording.startMs >= recording.endMs) {
+                addIssue(issues, ValidationCode::InvalidMetadata,
+                         path + ".recording", "startMs must be smaller than endMs");
+            } else if (recording.endMs - recording.startMs > maximumRecordingDurationMs) {
+                addIssue(issues, ValidationCode::LimitExceeded,
+                         path + ".recording", "recording range is longer than 2 hours");
+            }
+        }
         if (segment.generation.has_value()) {
             const GenerationRecord& record = *segment.generation;
             if (record.provider.empty() || isBlank(record.provider) ||
@@ -373,30 +430,17 @@ std::vector<ValidationIssue> validate(const Project& project, ValidationPurpose 
                          "must be non-blank UTF-8");
             }
             validateOptionalUtf8(record.model, path + ".generation.model", 1024);
-            validateOptionalUtf8(record.questionStem, path + ".generation.questionStem", 32 * 1024);
-            for (std::size_t option = 0; option < record.options.size(); ++option) {
-                validateOptionalUtf8(record.options[option],
-                                     path + ".generation.options[" +
-                                         std::to_string(option) + "]",
-                                     16 * 1024);
-            }
-            if (record.correctAnswer != "A" && record.correctAnswer != "B" &&
-                record.correctAnswer != "C") {
-                addIssue(issues, ValidationCode::InvalidMetadata,
-                         path + ".generation.correctAnswer", "must be A, B or C");
-            }
-            if (record.evidence.size() > 32) {
+            validateGenerationQuestion(record, path + ".generation");
+            if (record.additionalQuestions.size() > 2) {
                 addIssue(issues, ValidationCode::LimitExceeded,
-                         path + ".generation.evidence", "contains more than 32 entries");
+                         path + ".generation.additionalQuestions",
+                         "contains more than two additional questions");
             }
-            for (std::size_t evidence = 0; evidence < record.evidence.size(); ++evidence) {
-                const auto evidencePath = path + ".generation.evidence[" +
-                                          std::to_string(evidence) + "]";
-                const GenerationEvidence& item = record.evidence[evidence];
-                validateOptionalUtf8(item.option, evidencePath + ".option", 16);
-                validateOptionalUtf8(item.role, evidencePath + ".role", 32);
-                validateOptionalUtf8(item.turnId, evidencePath + ".turnId", 256);
-                validateOptionalUtf8(item.quote, evidencePath + ".quote", 32 * 1024);
+            for (std::size_t question = 0; question < record.additionalQuestions.size();
+                 ++question) {
+                validateGenerationQuestion(
+                    record.additionalQuestions[question],
+                    path + ".generation.additionalQuestions[" + std::to_string(question) + "]");
             }
             if (!record.requiresTeacherReview && !record.teacherReviewed) {
                 addIssue(issues, ValidationCode::InvalidMetadata,
@@ -463,7 +507,12 @@ std::chrono::milliseconds estimateSegmentDuration(const Segment& segment, double
         throw std::invalid_argument("pauseAfterSeconds must be a non-negative finite value");
     }
 
-    const auto speech = estimateReadingDuration(segment.text, targetWpm);
+    if (segment.recording && (segment.recording->endMs <= segment.recording->startMs || segment.recording->endMs > 7'200'000)) {
+        throw std::invalid_argument("recording range is invalid");
+    }
+    const auto speech = segment.recording
+        ? std::chrono::milliseconds(segment.recording->endMs - segment.recording->startMs)
+        : estimateReadingDuration(segment.text, targetWpm);
     const double totalMilliseconds =
         static_cast<double>(speech.count()) * static_cast<double>(segment.repeatCount) +
         segment.pauseAfterSeconds * 1000.0 * static_cast<double>(segment.repeatCount);
